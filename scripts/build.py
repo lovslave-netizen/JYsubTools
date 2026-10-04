@@ -54,7 +54,8 @@ def build_tools(cfg):
         shutil.copyfile(os.path.join(ROOT, t["entry"]), entry)
         cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed",
                "--name", t["exe"], "--distpath", os.path.join(STAGE, t["id"]),
-               "--workpath", os.path.join(wd, "w"), "--specpath", wd]
+               "--workpath", os.path.join(wd, "w"), "--specpath", wd,
+               "--paths", os.path.join(ROOT, "common")]
         if t.get("icon"):
             cmd += ["--icon", os.path.join(ROOT, t["icon"])]
         for m in t.get("excludes", []):
@@ -104,6 +105,13 @@ Name: "custom"; Description: "선택 설치"; Flags: iscustom
         src = os.path.join(STAGE, t["id"], t["exe"])
         L.append(f'Source: "{src}\\*"; DestDir: "{{app}}\\{t["id"]}"; Flags: recursesubdirs createallsubdirs ignoreversion; Components: {t["id"]}')
     L.append(f'Source: "{os.path.join(CACHE, "7zr.exe")}"; DestDir: "{{tmp}}"; Flags: deleteafterinstall')
+    vfile = os.path.join(BUILD, "version.txt")
+    with open(vfile, "w", encoding="utf-8") as vf:
+        vf.write(ver)
+    L.append(f'Source: "{vfile}"; DestDir: "{{app}}"; Flags: ignoreversion')
+    L.append("\n[Run]")
+    for t in tools:
+        L.append(f'Filename: "{{app}}\\{t["id"]}\\{t["exe"]}.exe"; Flags: nowait; Components: {t["id"]}; Check: LaunchIs({pas(t["id"])})')
     L.append("\n[Icons]")
     for t in tools:
         L.append(f'Name: "{{group}}\\{t["name"]}"; Filename: "{{app}}\\{t["id"]}\\{t["exe"]}.exe"; Components: {t["id"]}')
@@ -122,6 +130,8 @@ Name: "custom"; Description: "선택 설치"; Flags: iscustom
              "  Result := ExpandConstant('{app}\\bin\\.dep_') + Dep + '_' + Ver;", "end;", "",
              "function OnDownloadProgress(const Url, FileName: String; const Progress, ProgressMax: Int64): Boolean;",
              "begin", "  if Progress = ProgressMax then Log('다운로드 완료: ' + FileName);", "  Result := True;", "end;", "",
+             "function LaunchIs(const Id: String): Boolean;", "begin",
+             "  Result := ExpandConstant('{param:LAUNCH|}') = Id;", "end;", "",
              "procedure InitializeWizard;", "begin",
              "  DownloadPage := CreateDownloadPage(SetupMessage(msgWizardPreparing), SetupMessage(msgPreparingDesc), @OnDownloadProgress);",
              "end;", "",

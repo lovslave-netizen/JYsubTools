@@ -17,3 +17,7 @@ setup 하나로 개인 툴(인코딩도구, JYPlayer, PDF압축기 등)을 체�
 - 파일 편집 후 내용이 0바이트로 비워진 적이 있음(Edit 후크). 편집 뒤 파일 크기를 확인할 것.
 - 테스트 설치는 임시 폴더에 `/VERYSILENT /NOICONS /DIR=...` 로 하고 끝나면 언인스톨. 사용자의 실행 중인 프로세스는 건드리지 않는다.
 - 한국어로 답하고, 확인 못 한 것은 확인 안 했다고 말한다.
+
+## git 위치 (이 PC)
+- W: 에서 git 인덱스가 0바이트로 깨지는 일이 있어(덮어쓰기 쓰기 불안정) git 데이터는 `C:\Users\lovsl\.jysubtools-git` 에 있다. 작업 폴더는 W:\파이썬\JYsubTools. git 명령 전에 `GIT_DIR='C:\Users\lovsl\.jysubtools-git'; GIT_WORK_TREE='W:\파이썬\JYsubTools'` 환경변수를 지정할 것. (W: 쪽 빈 `.git` 폴더는 삭제 대기 상태로 남아 있음)
+- 다른 PC 에서는 GitHub 에서 `git clone` 해서 쓰면 된다.

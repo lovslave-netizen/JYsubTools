@@ -8,6 +8,7 @@ import os
 import random
 import re
 import sys
+import threading
 from ctypes import wintypes
 
 
@@ -31,6 +32,10 @@ for _d in (resource_dir(), os.path.normpath(os.path.join(app_dir(), "..", "bin")
         if hasattr(os, "add_dll_directory"):
             os.add_dll_directory(_d)
 
+_COMMON = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "common")
+if os.path.isdir(_COMMON):  # 개발 중(스크립트 실행)에는 repo 의 common 폴더를 사용
+    sys.path.insert(0, _COMMON)
+import jyupdate  # noqa: E402
 import mpv  # noqa: E402
 from send2trash import send2trash  # noqa: E402
 from PySide6.QtCore import QByteArray, QEvent, QObject, QPoint, Qt, QTimer, Signal  # noqa: E402
@@ -122,6 +127,10 @@ class MpvBridge(QObject):
     eof = Signal()
     load_error = Signal()
     file_loaded = Signal()
+
+
+class UpdateBridge(QObject):
+    found = Signal(str)  # 새 버전 문자열 (백그라운드 확인 스레드 -> UI)
 
 
 class VideoWidget(QWidget):
@@ -266,6 +275,8 @@ class MainWindow(QMainWindow):
         self.bridge.eof.connect(self._on_eof)
         self.bridge.load_error.connect(self._on_load_error)
         self.bridge.file_loaded.connect(self._on_file_loaded)
+        self.update_bridge = UpdateBridge()
+        self.update_bridge.found.connect(self._on_update_found)
 
         self.player = mpv.MPV(
             wid=str(int(self.video.winId())),
@@ -306,6 +317,7 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(QByteArray.fromBase64(geo.encode()))
         self._update_mode_label()
         QApplication.instance().installEventFilter(self)
+        QTimer.singleShot(4000, self._start_update_check)
 
     # ---------------------------------------------------------------- UI
     def _build_ui(self):
@@ -341,6 +353,10 @@ class MainWindow(QMainWindow):
         self.btn_open.setText("폴더 열기")
         self.btn_open.setFocusPolicy(Qt.NoFocus)
         self.btn_open.clicked.connect(self.choose_folder)
+        self.btn_update = QToolButton()
+        self.btn_update.setText("업데이트 확인")
+        self.btn_update.setFocusPolicy(Qt.NoFocus)
+        self.btn_update.clicked.connect(self.on_update_clicked)
 
         row1 = QHBoxLayout()
         row1.addWidget(self.btn_play)
@@ -354,6 +370,7 @@ class MainWindow(QMainWindow):
         row2.addWidget(self.lbl_index)
         row2.addWidget(self.chk_random)
         row2.addWidget(self.btn_open)
+        row2.addWidget(self.btn_update)
 
         self.bar = QWidget()
         self.bar.setObjectName("bar")
@@ -1060,6 +1077,98 @@ class MainWindow(QMainWindow):
         box.setStyleSheet("QMessageBox { background: #f2f2f2; } QLabel { color: #000000; }")
         box.exec()
 
+    # ---------------------------------------------------------------- 업데이트
+    def _start_update_check(self):
+        """켤 때 한 번, 조용히 확인. gh 가 없거나 로그인이 안 돼 있으면 아무것도 하지 않는다."""
+        cur = jyupdate.installed_version()
+        if not cur:
+            return
+
+        def work():
+            gh = jyupdate.find_gh()
+            if gh and jyupdate.logged_in(gh):
+                latest = jyupdate.latest_version(gh)
+                if latest and jyupdate.is_newer(latest, cur):
+                    self.update_bridge.found.emit(latest)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_found(self, latest):
+        self.btn_update.setText(f"새 버전 v{latest} 업데이트")
+        self.btn_update.setStyleSheet("QToolButton { color: #1b1b1b; background: #ffc861; font-weight: bold; }")
+        self.flash(f"새 버전 v{latest} 이 있습니다 (오른쪽 아래 업데이트 버튼)")
+
+    def _busy(self, fn):
+        """fn 을 스레드에서 실행하는 동안 화면이 멈추지 않게 이벤트를 처리하고 결과를 돌려준다."""
+        box = {}
+
+        def work():
+            try:
+                box["r"] = fn()
+            except Exception as e:  # noqa: BLE001
+                box["e"] = e
+
+        t = threading.Thread(target=work, daemon=True)
+        t.start()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            while t.is_alive():
+                QApplication.processEvents()
+                t.join(0.03)
+        finally:
+            QApplication.restoreOverrideCursor()
+        return box.get("r")
+
+    def _ask(self, text):
+        return QMessageBox.question(self, "JYPlayer 업데이트", text) == QMessageBox.Yes
+
+    def _warn(self, text):
+        QMessageBox.warning(self, "JYPlayer 업데이트", text)
+
+    def on_update_clicked(self):
+        self.btn_update.setEnabled(False)
+        try:
+            self._do_update()
+        finally:
+            self.btn_update.setEnabled(True)
+
+    def _do_update(self):
+        cur = jyupdate.installed_version()
+        if not cur:
+            QMessageBox.information(self, "JYPlayer 업데이트", "설치된 JYsubTools 에서만 업데이트할 수 있습니다.")
+            return
+        gh = jyupdate.find_gh()
+        if not gh:
+            if not self._ask("업데이트에는 GitHub CLI(gh)가 필요합니다.\n지금 설치할까요? (콘솔 창이 열립니다)"):
+                return
+            self._busy(jyupdate.install_gh_in_console)
+            gh = jyupdate.find_gh()
+            if not gh:
+                self._warn("gh 를 찾지 못했습니다. 설치가 끝났다면 JYPlayer 를 다시 켠 뒤 시도하세요.")
+                return
+        if not self._busy(lambda: jyupdate.logged_in(gh)):
+            if not self._ask("GitHub 로그인이 필요합니다.\n콘솔 창이 열리면 안내에 따라 로그인하세요. 열까요?"):
+                return
+            self._busy(lambda: jyupdate.login_in_console(gh))
+            if not self._busy(lambda: jyupdate.logged_in(gh)):
+                self._warn("로그인이 완료되지 않았습니다.")
+                return
+        latest = self._busy(lambda: jyupdate.latest_version(gh))
+        if not latest:
+            self._warn("최신 버전을 확인하지 못했습니다. (인터넷 연결이나 저장소 접근 권한을 확인하세요)")
+            return
+        if not jyupdate.is_newer(latest, cur):
+            QMessageBox.information(self, "JYPlayer 업데이트", f"이미 최신 버전입니다. (v{cur})")
+            return
+        if not self._ask(f"v{cur} → v{latest} 로 업데이트할까요?\n받은 뒤 JYPlayer 가 종료되고 다시 시작됩니다."):
+            return
+        self.flash("업데이트 파일을 받는 중...")
+        setup = self._busy(lambda: jyupdate.download_setup(gh, latest))
+        if not setup:
+            self._warn("업데이트 파일을 받지 못했습니다.")
+            return
+        jyupdate.launch_setup(setup, "jyplayer")
+        self.close()
     # ---------------------------------------------------------------- 표시
     def flash(self, msg, error=False):
         self._msg_token += 1
