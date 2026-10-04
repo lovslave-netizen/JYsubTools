@@ -21,3 +21,4 @@ setup 하나로 개인 툴(인코딩도구, JYPlayer, PDF압축기 등)을 체�
 ## git 위치 (이 PC)
 - W: 에서 git 인덱스가 0바이트로 깨지는 일이 있어(덮어쓰기 쓰기 불안정) git 데이터는 `C:\Users\lovsl\.jysubtools-git` 에 있다. 작업 폴더는 W:\파이썬\JYsubTools. git 명령 전에 `GIT_DIR='C:\Users\lovsl\.jysubtools-git'; GIT_WORK_TREE='W:\파이썬\JYsubTools'` 환경변수를 지정할 것. (W: 쪽 빈 `.git` 폴더는 삭제 대기 상태로 남아 있음)
 - 다른 PC 에서는 GitHub 에서 `git clone` 해서 쓰면 된다.
+- Edit/Write 도구로 W: 의 **기존 파일**을 덮어쓰면 0바이트가 되는 일이 반복됨 -> 스크래치패드에 쓰고 PowerShell(WriteAllText)로 복사하거나, Python/PowerShell 치환 스크립트로 수정. 항상 파일 크기 확인.
