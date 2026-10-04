@@ -45,6 +45,7 @@
       "desc": "단축키 중심 동영상 플레이어 (libmpv 필요)",
       "entry": "tools/jyplayer/jyplayer.py",
       "exe": "JYPlayer",
+      "icon": "tools/jyplayer/JYPlayer.ico",
       "excludes": ["tkinter", "numpy", "PIL"],
       "deps": ["libmpv"]
     },

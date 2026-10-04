@@ -55,6 +55,8 @@ def build_tools(cfg):
         cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed",
                "--name", t["exe"], "--distpath", os.path.join(STAGE, t["id"]),
                "--workpath", os.path.join(wd, "w"), "--specpath", wd]
+        if t.get("icon"):
+            cmd += ["--icon", os.path.join(ROOT, t["icon"])]
         for m in t.get("excludes", []):
             cmd += ["--exclude-module", m]
         subprocess.run(cmd + [entry], check=True)
