@@ -1,0 +1,48 @@
+name: release
+
+# 릴리스: tools.json 의 version 을 올리고 커밋 -> 같은 번호의 태그를 push (scripts/release.ps1 이 해 줌)
+#   v0.1.1 태그 -> JYsubTools-Setup-0.1.1.exe 가 Releases 에 올라간다.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  PYTHONUTF8: "1"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: 태그와 tools.json 버전 일치 확인
+        shell: pwsh
+        run: |
+          pip install -r requirements.txt
+          $v = (python -c "import json; print(json.load(open('tools.json', encoding='utf-8'))['version'])").Trim()
+          if ("v$v" -ne $env:GITHUB_REF_NAME) { throw "태그($env:GITHUB_REF_NAME)와 tools.json($v)이 다릅니다" }
+
+      - name: Inno Setup 준비
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: 빌드 (툴 exe + 설치 파일)
+        shell: pwsh
+        run: python scripts/build.py
+
+      - name: 릴리스 업로드
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME dist/JYsubTools-Setup-*.exe --title $env:GITHUB_REF_NAME --generate-notes

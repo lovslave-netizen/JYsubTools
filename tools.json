@@ -1,0 +1,60 @@
+{
+  "version": "0.1.0",
+  "app_id": "6F1B2C4E-8A53-4D7B-9C31-5E2A7B90D1A4",
+  "deps": {
+    "ffmpeg": {
+      "label": "ffmpeg",
+      "url": "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.7z",
+      "file": "ffmpeg-9.0.2-essentials_build.7z",
+      "sha256": "4705843ccaaf54257c16ad90f3e952ece33c17df964ecf7bfdbb0f49c7171077",
+      "version": "9.0.2",
+      "pick": [
+        "ffmpeg-9.0.2-essentials_build\\bin\\ffmpeg.exe",
+        "ffmpeg-9.0.2-essentials_build\\bin\\ffprobe.exe"
+      ]
+    },
+    "libmpv": {
+      "label": "libmpv (mpv 재생 엔진)",
+      "url": "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261004/mpv-dev-x86_64-20261004-git-413ff0b1cd.7z",
+      "file": "mpv-dev-x86_64-20261004-git-413ff0b1cd.7z",
+      "sha256": "445fc72a8aa10980504355a5d99c9a0a128c2fa177e029996fb312d9d3193d45",
+      "version": "20261004",
+      "pick": ["libmpv-2.dll"]
+    }
+  },
+  "tools": [
+    {
+      "id": "encoder",
+      "name": "인코딩도구",
+      "desc": "H.265 인코딩 (ffmpeg 필요)",
+      "entry": "tools/encoder/인코딩도구.pyw",
+      "exe": "인코딩도구",
+      "deps": ["ffmpeg"]
+    },
+    {
+      "id": "encoder_clean",
+      "name": "커진결과정리",
+      "desc": "인코딩 후 커진 결과 정리",
+      "entry": "tools/encoder/커진결과정리.pyw",
+      "exe": "커진결과정리",
+      "deps": []
+    },
+    {
+      "id": "jyplayer",
+      "name": "JYPlayer",
+      "desc": "단축키 중심 동영상 플레이어 (libmpv 필요)",
+      "entry": "tools/jyplayer/jyplayer.py",
+      "exe": "JYPlayer",
+      "excludes": ["tkinter", "numpy", "PIL"],
+      "deps": ["libmpv"]
+    },
+    {
+      "id": "pdfcompress",
+      "name": "PDF압축기",
+      "desc": "PDF 용량 줄이기",
+      "entry": "tools/pdfcompress/pdf_compressor_gui.pyw",
+      "exe": "PDF압축기",
+      "deps": []
+    }
+  ]
+}

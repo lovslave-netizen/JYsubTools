@@ -1,0 +1,6 @@
+pyinstaller
+PySide6
+python-mpv
+Send2Trash
+PyMuPDF
+Pillow

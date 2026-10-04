@@ -1,0 +1,15 @@
+# build output
+build/
+dist/
+Setup/
+__pycache__/
+*.pyc
+
+# personal/runtime data (never commit)
+JYPlayer_settings.json
+*.zip
+
+# large binaries are downloaded by the installer (see tools.json), never committed
+*.dll
+ffmpeg.exe
+ffprobe.exe
