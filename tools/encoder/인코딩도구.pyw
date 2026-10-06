@@ -136,6 +136,21 @@ def probe(path):
     if not v:
         return None
     fmt = j.get("format", {})
+    has_audio = any(s.get("codec_type") == "audio" for s in j.get("streams", []))
+    w, h = v.get("width"), v.get("height")
+    rot = 0
+    try:
+        for sd in v.get("side_data_list", []):
+            if "rotation" in sd:
+                rot = int(float(sd["rotation"]))
+        rot = rot or int(float(v.get("tags", {}).get("rotate", 0) or 0))
+    except (TypeError, ValueError):
+        rot = 0
+    if w and h and rot % 180 == 90:  # 폰 영상: 화면에 보이는 방향 기준으로 표시/합치기
+        w, h = h, w
+    fps = v.get("avg_frame_rate") or ""
+    if not fps or fps.startswith("0/"):
+        fps = v.get("r_frame_rate") or "30"
     dur = float(fmt.get("duration") or v.get("duration") or 0)
     size = int(fmt.get("size") or os.path.getsize(path))
     br = int(v.get("bit_rate") or 0)
@@ -144,7 +159,9 @@ def probe(path):
     return {
         "codec": v.get("codec_name", "?"),
         "bitrate": br,
-        "res": f"{v.get('width', '?')}x{v.get('height', '?')}",
+        "res": f"{w or '?'}x{h or '?'}",
+        "audio": has_audio,
+        "fps": fps,
         "tenbit": "10" in (v.get("pix_fmt") or ""),
         "duration": dur,
         "size": size,
@@ -195,7 +212,7 @@ def cached_probe(path, cache):
         return None, 0
     key = os.path.normpath(path)
     c = cache.get(key)
-    if c and c["size"] == st.st_size and c["mtime"] == st.st_mtime:
+    if c and c["size"] == st.st_size and c["mtime"] == st.st_mtime and "audio" in c["info"]:
         return c["info"], 1
     info = probe(path)
     if info:
@@ -211,17 +228,58 @@ def build_cmd(src, dst, enc, q, preset, info):
     else:  # mp4 등: 영상/오디오/자막(mov_text)만
         cmd += ["-map", "0:V", "-map", "0:a?", "-map", "0:s?", "-c:a", "copy", "-c:s", "mov_text"]
     cmd += ["-map_metadata", "0"]
-    ten = info["tenbit"]
+    cmd += enc_args(enc, q, preset, info["tenbit"])
+    cmd += ["-tag:v", "hvc1", dst]
+    return cmd
+
+
+def enc_args(enc, q, preset, ten):
     if enc == "cpu":
-        cmd += ["-c:v", "libx265", "-crf", str(q), "-preset", preset,
+        return ["-c:v", "libx265", "-crf", str(q), "-preset", preset,
                 "-pix_fmt", "yuv420p10le" if ten else "yuv420p"]
-    elif enc == "qsv":
-        cmd += ["-c:v", "hevc_qsv", "-global_quality", str(q), "-preset", preset,
+    if enc == "qsv":
+        return ["-c:v", "hevc_qsv", "-global_quality", str(q), "-preset", preset,
                 "-pix_fmt", "p010le" if ten else "nv12"]
-    else:
-        cmd += ["-c:v", "hevc_amf", "-quality", AMF_QUALITY[preset], "-rc", "cqp",
-                "-qp_i", str(q), "-qp_p", str(q + 2),
-                "-pix_fmt", "p010le" if ten else "nv12"]
+    return ["-c:v", "hevc_amf", "-quality", AMF_QUALITY[preset], "-rc", "cqp",
+            "-qp_i", str(q), "-qp_p", str(q + 2),
+            "-pix_fmt", "p010le" if ten else "nv12"]
+
+
+def build_merge_cmd(items, dst, enc, q, preset):
+    """items = [(경로, info), ...] 를 순서대로 이어 붙이면서 H.265 로 인코딩 (concat 필터 - 해상도/코덱이 달라도 됨).
+    해상도는 첫 영상 기준(다르면 비율 유지 + 검은 여백), 음성이 없는 영상은 무음으로 채우고, 자막/챕터는 버린다."""
+    cmd = [FFMPEG, "-hide_banner", "-nostats", "-y", "-progress", "pipe:1"]
+    for path, _ in items:
+        cmd += ["-i", path]
+    first = items[0][1]
+    fps = first.get("fps") or "30"
+    same_res = len({i["res"] for _, i in items}) == 1
+    try:
+        w, h = (int(x) for x in first["res"].split("x"))
+    except ValueError:
+        w = h = 0
+        same_res = True
+    any_audio = any(i.get("audio", True) for _, i in items)
+    parts, labels = [], ""
+    for n, (_, info) in enumerate(items):
+        vf = f"[{n}:v:0]"
+        if not same_res:
+            vf += f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,"
+        parts.append(f"{vf}setsar=1,fps={fps}[v{n}]")
+        labels += f"[v{n}]"
+        if any_audio:
+            if info.get("audio", True):
+                parts.append(f"[{n}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a{n}]")
+            else:
+                parts.append(f"anullsrc=r=48000:cl=stereo,atrim=duration={info['duration']:.3f},"
+                             f"asetpts=PTS-STARTPTS[a{n}]")
+            labels += f"[a{n}]"
+    parts.append(f"{labels}concat=n={len(items)}:v=1:a={1 if any_audio else 0}[outv]" + ("[outa]" if any_audio else ""))
+    cmd += ["-filter_complex", ";".join(parts), "-map", "[outv]"]
+    if any_audio:
+        cmd += ["-map", "[outa]", "-c:a", "aac", "-b:a", "192k"]
+    cmd += ["-map_metadata", "0", "-map_chapters", "-1"]
+    cmd += enc_args(enc, q, preset, any(i["tenbit"] for _, i in items))
     cmd += ["-tag:v", "hvc1", dst]
     return cmd
 
@@ -288,9 +346,9 @@ class App(tk.Tk):
         ttk.Combobox(opt, textvariable=self.after_done, values=AFTER, width=10,
                      state="readonly").pack(side="left", padx=6)
 
-        cols = ("sel", "name", "codec", "bitrate", "res", "size", "outsize", "ratio", "status")
-        heads = ("선택", "파일 (폴더)", "코덱", "비트레이트", "해상도", "원본 크기", "결과 크기", "감소율", "상태")
-        widths = (50, 380, 60, 90, 80, 80, 80, 70, 150)
+        cols = ("sel", "merge", "name", "codec", "bitrate", "res", "size", "outsize", "ratio", "status")
+        heads = ("선택", "합치기", "파일 (폴더)", "코덱", "비트레이트", "해상도", "원본 크기", "결과 크기", "감소율", "상태")
+        widths = (50, 60, 380, 60, 90, 80, 80, 80, 70, 170)
         self.tree = ttk.Treeview(self, columns=cols, show="headings", selectmode="extended")
         for c, h, w in zip(cols, heads, widths):
             self.tree.heading(c, text=h, command=lambda c=c: self.sort_by(c))
@@ -433,7 +491,7 @@ class App(tk.Tk):
     def _row_values(self, it):
         i = it["info"]
         o = it.get("out")
-        return ("☑" if it["checked"] else "☐", it["label"], i["codec"], fmt_rate(i["bitrate"]),
+        return ("☑" if it["checked"] else "☐", "☑" if it.get("merge") else "☐", it["label"], i["codec"], fmt_rate(i["bitrate"]),
                 i["res"], fmt_size(i["size"]), fmt_size(o["size"]) if o else "",
                 f"-{100 - o['size'] / i['size'] * 100:.0f}%" if o and o["size"] < i["size"]
                 else (f"+{o['size'] / i['size'] * 100 - 100:.0f}%" if o else ""), it["status"])
@@ -445,10 +503,17 @@ class App(tk.Tk):
     def on_click(self, e):
         if self.tree.identify_region(e.x, e.y) != "cell":
             return
-        if self.tree.identify_column(e.x) == "#1":
+        col = self.tree.identify_column(e.x)
+        if col in ("#1", "#2"):
             iid = self.tree.identify_row(e.y)
             if iid and not self.busy:
-                self.items[iid]["checked"] ^= True
+                it = self.items[iid]
+                if col == "#1":
+                    it["checked"] ^= True
+                else:  # 합치기 표시 = 인코딩 대상으로도 체크
+                    it["merge"] = not it.get("merge")
+                    if it["merge"]:
+                        it["checked"] = True
                 self.refresh(iid)
             return "break"
 
@@ -459,6 +524,12 @@ class App(tk.Tk):
         m = tk.Menu(self, tearoff=0)
         m.add_command(label="선택한 행 체크", command=lambda: self.check_selected(True))
         m.add_command(label="선택한 행 체크 해제", command=lambda: self.check_selected(False))
+        m.add_separator()
+        m.add_command(label="선택한 행 합치기 (체크 + 합치기 표시)", command=lambda: self.mark_merge(True))
+        m.add_command(label="선택한 행 합치기 해제", command=lambda: self.mark_merge(False))
+        m.add_command(label="위로 이동 (합치는 순서)", command=lambda: self.move_selected(-1))
+        m.add_command(label="아래로 이동 (합치는 순서)", command=lambda: self.move_selected(1))
+        m.add_separator()
         m.add_command(label="목록에서 제거", command=self.remove_selected)
         m.add_command(label="폴더 열기", command=self.open_folder)
         m.tk_popup(e.x_root, e.y_root)
@@ -467,6 +538,33 @@ class App(tk.Tk):
         for iid in self.tree.selection():
             self.items[iid]["checked"] = v
             self.refresh(iid)
+
+    def mark_merge(self, v):
+        if self.busy:
+            return
+        for iid in self.tree.selection():
+            self.items[iid]["merge"] = v
+            if v:
+                self.items[iid]["checked"] = True
+            self.refresh(iid)
+
+    def move_selected(self, delta):
+        """선택한 행을 위/아래로 한 칸 이동 (합치기는 목록에 보이는 순서대로 이어 붙인다)."""
+        if self.busy:
+            return
+        order = self.tree.get_children()
+        sel = [i for i in order if i in self.tree.selection()]
+        if not sel:
+            return
+        if delta < 0:
+            if order[0] == sel[0]:
+                return
+        else:
+            if order[-1] == sel[-1]:
+                return
+            sel.reverse()
+        for iid in sel:
+            self.tree.move(iid, "", self.tree.index(iid) + delta)
 
     def remove_selected(self):
         if self.busy:
@@ -505,16 +603,14 @@ class App(tk.Tk):
             self.tree.move(iid, "", n)
 
     def sort_by(self, col):
-        idx = {"sel": 0, "name": 1, "codec": 2, "bitrate": 3, "res": 4, "size": 5, "outsize": 6,
-               "ratio": 7, "status": 8}[col]
-
         def key(iid):
             it = self.items[iid]
             i = it["info"]
             o = it.get("out")
-            return {0: it["checked"], 1: it["label"].lower(), 2: i["codec"], 3: i["bitrate"],
-                    4: i["res"], 5: i["size"], 6: o["size"] if o else 0,
-                    7: o["size"] / i["size"] if o else 9, 8: it["status"]}[idx]
+            return {"sel": it["checked"], "merge": bool(it.get("merge")), "name": it["label"].lower(),
+                    "codec": i["codec"], "bitrate": i["bitrate"], "res": i["res"], "size": i["size"],
+                    "outsize": o["size"] if o else 0, "ratio": o["size"] / i["size"] if o else 9,
+                    "status": it["status"]}[col]
 
         rev = self.sort_rev[col] = not self.sort_rev.get(col, True)
         for n, iid in enumerate(sorted(self.items, key=key, reverse=rev)):
@@ -526,6 +622,12 @@ class App(tk.Tk):
         base, ext = os.path.splitext(name)
         ext = ext if ext.lower() in (".mp4", ".mkv") else ".mkv"
         return os.path.join(d, PREFIX + base + ext)
+
+    def merge_path(self, its):
+        d, name = os.path.split(its[0]["path"])
+        base, ext = os.path.splitext(name)
+        ext = ext if ext.lower() in (".mp4", ".mkv") else ".mkv"
+        return os.path.join(d, f"{PREFIX}합침_{base}_외{len(its) - 1}개{ext}")
 
     def start(self):
         if self.busy:
@@ -552,35 +654,76 @@ class App(tk.Tk):
                 todo = [i for i in todo if i not in warn]
                 if not todo:
                     return
+        # 작업 목록: 합치기 표시된 항목(2개 이상)은 목록 순서대로 하나의 작업, 나머지는 각각 하나씩
+        merge_ids = [i for i in todo if self.items[i].get("merge")]
+        if len(merge_ids) >= 2:
+            its = [self.items[i] for i in merge_ids]
+            res = sorted({it["info"]["res"] for it in its})
+            order = "\n".join(f"{n}. {it['label']}" for n, it in enumerate(its[:12], 1))
+            more = f"\n… 외 {len(its) - 12}개" if len(its) > 12 else ""
+            note = (f"\n\n※ 해상도가 서로 다릅니다 ({', '.join(res)}). 첫 영상({its[0]['info']['res']}) 크기에 맞추고 "
+                    f"남는 곳은 검은 여백이 됩니다." if len(res) > 1 else "")
+            if not messagebox.askokcancel(
+                    "합치기",
+                    f"합치기 표시된 {len(its)}개를 아래 순서로 이어 붙여 파일 1개로 인코딩합니다.\n\n{order}{more}\n\n"
+                    f"결과: {os.path.basename(self.merge_path(its))}{note}\n\n"
+                    f"나머지 {len(todo) - len(its)}개는 각각 따로 인코딩합니다.\n(합치면 자막/챕터는 버려지고 음성은 AAC로 다시 인코딩됩니다)"):
+                return
+            jobs, placed = [], False
+            for i in todo:
+                if i in merge_ids:
+                    if not placed:
+                        jobs.append(merge_ids)
+                        placed = True
+                else:
+                    jobs.append([i])
+        else:
+            jobs = [[i] for i in todo]
         self._save_settings()
         self.busy = True
         self.stop_flag = False
         self.btn_go.config(state="disabled")
         self.btn_stop.config(state="normal")
         enc, qv, pre = self.enc.get(), self.qual.get(), self.preset.get()
-        threading.Thread(target=self._worker, args=(todo, enc, qv, pre, self.auto_del.get()), daemon=True).start()
+        threading.Thread(target=self._worker, args=(jobs, enc, qv, pre, self.auto_del.get()), daemon=True).start()
 
     def stop(self):
         self.stop_flag = True
         if self.proc and self.proc.poll() is None:
             self.proc.kill()
 
-    def _worker(self, todo, enc, qv, pre, auto_del):
-        total = len(todo)
+    def _worker(self, jobs, enc, qv, pre, auto_del):
+        total = len(jobs)
         ok = 0
-        for n, iid in enumerate(todo, 1):
+        for n, iids in enumerate(jobs, 1):
             if self.stop_flag:
                 break
-            it = self.items[iid]
-            src, info = it["path"], it["info"]
-            dst = self.out_path(src)
-            self.q.put(("status", iid, "인코딩 중 0%"))
-            self.q.put(("msg", f"[{n}/{total}] {os.path.basename(src)}"))
+            its = [self.items[i] for i in iids]
+            merge = len(iids) > 1
+            infos = [it["info"] for it in its]
+            duration = sum(i["duration"] for i in infos)
+            orig_size = sum(i["size"] for i in infos)
+
+            def status(text):
+                for i in iids:
+                    self.q.put(("status", i, text))
+
+            if merge:
+                dst = self.merge_path(its)
+                name = f"합치기 {len(its)}개 → {os.path.basename(dst)}"
+            else:
+                dst = self.out_path(its[0]["path"])
+                name = os.path.basename(its[0]["path"])
+            status("합치는 중 0%" if merge else "인코딩 중 0%")
+            self.q.put(("msg", f"[{n}/{total}] {name}"))
             if os.path.exists(dst):
-                self.q.put(("status", iid, "건너뜀 (결과 파일 있음)"))
+                status("건너뜀 (결과 파일 있음)")
                 continue
             part = dst + ".part" + os.path.splitext(dst)[1]
-            cmd = build_cmd(src, part, enc, qv, pre, info)
+            if merge:
+                cmd = build_merge_cmd([(it["path"], it["info"]) for it in its], part, enc, qv, pre)
+            else:
+                cmd = build_cmd(its[0]["path"], part, enc, qv, pre, infos[0])
             tail = []
             t0 = time.time()
             try:
@@ -588,12 +731,12 @@ class App(tk.Tk):
                                              creationflags=NOWIN)
                 for raw in self.proc.stdout:
                     line = raw.decode("utf-8", "replace").strip()
-                    if line.startswith("out_time_us=") and info["duration"]:
+                    if line.startswith("out_time_us=") and duration:
                         try:
-                            pct = min(99, int(line[12:]) / 1e6 / info["duration"] * 100)
+                            pct = min(99, int(line[12:]) / 1e6 / duration * 100)
                         except ValueError:
                             continue
-                        self.q.put(("prog", iid, pct, (n - 1 + pct / 100) / total * 100))
+                        self.q.put(("prog", iids, pct, (n - 1 + pct / 100) / total * 100, merge))
                     elif "=" not in line or line.startswith(("Error", "[")):
                         tail.append(line)
                         tail = tail[-15:]
@@ -602,35 +745,42 @@ class App(tk.Tk):
                 rc, tail = -1, [str(e)]
             if self.stop_flag:
                 self._rm(part)
-                self.q.put(("status", iid, "중지됨"))
+                status("중지됨")
                 break
             if rc == 0 and os.path.exists(part):
                 os.replace(part, dst)
                 try:
-                    copy_times(src, dst)
+                    copy_times(its[0]["path"], dst)
                 except Exception:
                     pass
                 el = time.time() - t0
-                if el > 3 and info["duration"]:  # 너무 짧은 파일은 오차가 커서 제외
-                    self.q.put(("speed", f"{enc}|{pre}", info["duration"] * pixels(info["res"]) / el))
+                if el > 3 and duration:  # 너무 짧은 파일은 오차가 커서 제외
+                    self.q.put(("speed", f"{enc}|{pre}",
+                                sum(i["duration"] * pixels(i["res"]) for i in infos) / el))
                 new = os.path.getsize(dst)
-                if new >= info["size"]:  # 원본보다 커지면 인코딩 의미가 없음
-                    pct = new / info["size"] * 100 - 100
+                if new >= orig_size:  # 원본보다 커지면 인코딩 의미가 없음
+                    pct = new / orig_size * 100 - 100
                     if auto_del and delete_file(dst):
-                        self.q.put(("bigger", iid, new, enc, qv, pre))
-                        self.q.put(("status", iid, f"커져서 삭제됨 (+{pct:.0f}%)"))
+                        if not merge:
+                            self.q.put(("bigger", iids[0], new, enc, qv, pre))
+                        status(f"커져서 삭제됨 (+{pct:.0f}%)")
                         continue
-                    self.q.put(("out", iid, dst))
-                    self.q.put(("status", iid, f"커짐 (+{pct:.0f}%) 결과 삭제 권장"))
+                    if not merge:
+                        self.q.put(("out", iids[0], dst))
+                    status(f"커짐 (+{pct:.0f}%) 결과 삭제 권장")
                     ok += 1
                     continue
-                self.q.put(("out", iid, dst))
-                self.q.put(("status", iid, "완료"))
+                if merge:
+                    self.q.put(("mout", iids, dst, new, orig_size, duration))
+                    status("합침 완료")
+                else:
+                    self.q.put(("out", iids[0], dst))
+                    status("완료")
                 ok += 1
             else:
                 self._rm(part)
-                self.q.put(("status", iid, "실패"))
-                self.q.put(("log", os.path.basename(src), "\n".join(tail)))
+                status("실패")
+                self.q.put(("log", name, "\n".join(tail)))
         self.q.put(("done", ok, total))
 
     @staticmethod
@@ -735,10 +885,25 @@ class App(tk.Tk):
 
     def delete_originals(self):
         """줄어든 결과가 있는 원본 중 체크된 것을 휴지통으로. 길이가 다르면 안전상 제외."""
-        cand, skipped = [], []
+        cand, skipped, merged_ok = [], [], {}
         for iid in self.tree.get_children():
             it = self.items[iid]
             o = it.get("out")
+            if it["checked"] and not o and it.get("mout"):  # 합쳐서 인코딩한 멤버: 합친 파일을 검증
+                m = it["mout"]
+                if m["path"] not in merged_ok:
+                    mi = probe(m["path"]) if os.path.exists(m["path"]) else None
+                    if m["size"] >= m["orig_size"]:
+                        merged_ok[m["path"]] = "합친 결과가 안 줄어듦"
+                    elif not mi or abs(mi["duration"] - m["orig_dur"]) > max(2, 0.5 * m["count"]):
+                        merged_ok[m["path"]] = "합친 결과 길이 불일치/손상"
+                    else:
+                        merged_ok[m["path"]] = ""
+                if merged_ok[m["path"]]:
+                    skipped.append(f"{it['label']}  ({merged_ok[m['path']]})")
+                else:
+                    cand.append((iid, it))
+                continue
             if not it["checked"] or not o:
                 continue
             if o["size"] >= it["info"]["size"]:
@@ -753,7 +918,13 @@ class App(tk.Tk):
             messagebox.showinfo("원본 삭제", "삭제 대상이 없습니다.\n(체크된 항목 중 결과가 있고 크기가 줄어든 것만 대상)"
                                 + ("\n\n제외:\n" + "\n".join(skipped[:10]) if skipped else ""))
             return
-        saved = sum(it["info"]["size"] - it["out"]["size"] for _, it in cand)
+        saved = sum(it["info"]["size"] - it["out"]["size"] for _, it in cand if it.get("out"))
+        groups = {}
+        for _, it in cand:
+            if not it.get("out") and it.get("mout"):
+                g = groups.setdefault(it["mout"]["path"], [0, it["mout"]["size"]])
+                g[0] += it["info"]["size"]
+        saved += sum(max(0, a - b) for a, b in groups.values())  # 합친 파일 크기를 뺀 순수 확보 용량
         msg = (f"원본 {len(cand)}개를 휴지통으로 보냅니다.\n확보 용량: {fmt_size(saved)}"
                + (f"\n\n제외 {len(skipped)}개:\n" + "\n".join(skipped[:10]) if skipped else ""))
         if not messagebox.askyesno("원본 삭제", msg + "\n\n진행할까요?"):
@@ -806,7 +977,7 @@ class App(tk.Tk):
                     _, path, info, root = m
                     label = os.path.relpath(path, root) if root else os.path.basename(path)
                     it = {"path": path, "info": info, "checked": info["codec"] != "hevc",
-                          "status": "", "label": label}
+                          "status": "", "label": label, "merge": False}
                     dst = self.out_path(path)
                     if os.path.exists(dst):  # 이전에 만든 결과가 있으면 비교 대상으로 연결
                         it["out"] = {"path": dst, "size": os.path.getsize(dst)}
@@ -842,14 +1013,22 @@ class App(tk.Tk):
                     self.msg.config(text=f"목록 {len(self.items)}개 (스캔 {m[1]}개)")
                 elif k == "status":
                     self.items[m[1]]["status"] = m[2]
-                    if not m[2].startswith("인코딩 중"):
+                    if not m[2].startswith(("인코딩 중", "합치는 중")):
                         self.items[m[1]]["pct"] = 0
                     self.refresh(m[1])
                 elif k == "prog":
-                    self.items[m[1]]["status"] = f"인코딩 중 {m[2]:.0f}%"
-                    self.items[m[1]]["pct"] = m[2]
-                    self.refresh(m[1])
+                    for iid in m[1]:
+                        self.items[iid]["status"] = f"{'합치는' if m[4] else '인코딩'} 중 {m[2]:.0f}%"
+                        self.items[iid]["pct"] = m[2]
+                        self.refresh(iid)
                     self.pb["value"] = m[3]
+                elif k == "mout":  # 합치기 결과: 멤버마다 기록해 두고 '줄어든 원본 삭제'에서 검증해 사용
+                    for iid in m[1]:
+                        it = self.items[iid]
+                        it["mout"] = {"path": m[2], "size": m[3], "orig_size": m[4], "orig_dur": m[5],
+                                      "count": len(m[1])}
+                        it["checked"] = False
+                        self.refresh(iid)
                 elif k == "speed":  # 파일 하나 끝날 때마다 실측 속도를 이동평균으로 저장
                     old = self.speed.get(m[1])
                     self.speed[m[1]] = m[2] if not old else old * 0.5 + m[2] * 0.5

@@ -42,7 +42,7 @@ from PySide6.QtCore import QByteArray, QEvent, QObject, QPoint, Qt, QTimer, Sign
 from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QPalette  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QAbstractItemView, QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QListWidget,
-    QListWidgetItem, QMainWindow, QMessageBox, QSlider, QSplitter, QToolButton, QVBoxLayout, QWidget,
+    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QSlider, QSplitter, QToolButton, QVBoxLayout, QWidget,
 )
 
 VIDEO_EXTS = {
@@ -56,6 +56,7 @@ VK_SHIFT, VK_CONTROL, VK_HANJA = 0x10, 0x11, 0x19
 VK_ESCAPE, VK_RETURN, VK_SPACE, VK_PRIOR, VK_NEXT = 0x1B, 0x0D, 0x20, 0x21, 0x22
 VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN, VK_DELETE = 0x25, 0x26, 0x27, 0x28, 0x2E
 VK_F, VK_P, VK_R = 0x46, 0x50, 0x52
+VK_OEM_4 = 0xDB  # [ 키
 VK_C, VK_X = 0x43, 0x58
 VK_MULTIPLY, VK_ADD, VK_SUBTRACT = 0x6A, 0x6B, 0x6D  # 숫자패드 * + -
 ZOOM_STEP = 0.1  # mpv video-zoom 은 로그(2^x) 단위
@@ -136,6 +137,7 @@ class UpdateBridge(QObject):
 class VideoWidget(QWidget):
     doubleClicked = Signal()
     rightClicked = Signal()
+    wheeled = Signal(int)  # 휠 한 칸 = +1(위) / -1(아래)
 
     def __init__(self):
         super().__init__()
@@ -185,6 +187,12 @@ class VideoWidget(QWidget):
     def mouseDoubleClickEvent(self, ev):
         if ev.button() == Qt.LeftButton:
             self.doubleClicked.emit()
+
+    def wheelEvent(self, ev):
+        dy = ev.angleDelta().y()
+        if dy:
+            self.wheeled.emit(1 if dy > 0 else -1)
+        ev.accept()
 
 
 class PlaylistWidget(QListWidget):
@@ -244,6 +252,78 @@ class ClickSlider(QSlider):
             self.seekRequested.emit(self._frac(ev), True)
 
 
+class VolumeSlider(QSlider):
+    """클릭/드래그한 위치로 바로 볼륨이 바뀌는 슬라이더 (휠로도 조절)"""
+    volumeRequested = Signal(int)
+
+    def __init__(self):
+        super().__init__(Qt.Horizontal)
+        self.setRange(0, VOLUME_MAX)
+        self.setFixedWidth(90)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setToolTip("볼륨")
+        self._drag = False
+
+    def _vol(self, ev):
+        return round(min(1.0, max(0.0, ev.position().x() / max(1, self.width()))) * VOLUME_MAX)
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self._drag = True
+            self.volumeRequested.emit(self._vol(ev))
+
+    def mouseMoveEvent(self, ev):
+        if self._drag:
+            self.volumeRequested.emit(self._vol(ev))
+
+    def mouseReleaseEvent(self, ev):
+        self._drag = False
+
+    def wheelEvent(self, ev):
+        dy = ev.angleDelta().y()
+        if dy:
+            self.volumeRequested.emit(max(0, min(VOLUME_MAX, self.value() + (VOLUME_STEP if dy > 0 else -VOLUME_STEP))))
+        ev.accept()
+
+
+class FullscreenBar(QWidget):
+    """전체화면에서 마우스를 화면 아래로 가져가면 뜨는 재생바 (mpv 창 위에 올리려고 별도의 맨 위 창으로 만든다)."""
+    HEIGHT = 46
+
+    def __init__(self, parent):
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setObjectName("fsbar")
+        self.btn_play = QToolButton()
+        self.btn_play.setText("▶")
+        self.btn_play.setFocusPolicy(Qt.NoFocus)
+        self.slider = ClickSlider()
+        self.lbl_time = QLabel("--:-- / --:--")
+        self.lbl_vol = QLabel("🔊")
+        self.vol_slider = VolumeSlider()
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 6, 14, 6)
+        lay.addWidget(self.btn_play)
+        lay.addWidget(self.slider, 1)
+        lay.addWidget(self.lbl_time)
+        lay.addWidget(self.lbl_vol)
+        lay.addWidget(self.vol_slider)
+        self.setStyleSheet("""
+            QWidget#fsbar { background: #1b1b1b; }
+            QLabel { color: #dddddd; }
+            QToolButton { color: #dddddd; background: #2a2a2a; border: 1px solid #3a3a3a; padding: 2px 8px; }
+            QSlider::groove:horizontal { height: 6px; background: #3a3a3a; }
+            QSlider::sub-page:horizontal { background: #4a90d9; }
+            QSlider::handle:horizontal { width: 12px; margin: -4px 0; background: #dddddd; border-radius: 6px; }
+        """)
+        self.setWindowOpacity(0.9)
+
+    def place_on(self, screen_geo):
+        self.setGeometry(screen_geo.x(), screen_geo.y() + screen_geo.height() - self.HEIGHT,
+                         screen_geo.width(), self.HEIGHT)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -254,6 +334,7 @@ class MainWindow(QMainWindow):
         self.settings = self._load_settings()
         self.rotations = self.settings.setdefault("rotation", {})
         self.random_mode = bool(self.settings.get("random", False))
+        self.watched = set(self.settings.get("watched", []))  # 한 번이라도 재생을 시작한 파일 (재생목록에 ✔ 표시)
 
         self.files = []   # 폴더 내(하위 폴더 포함) 동영상 (자연 정렬)
         self.order = []   # 재생 순서 (랜덤이면 섞인 순서)
@@ -270,6 +351,10 @@ class MainWindow(QMainWindow):
         self._cursor_idle_ticks = 0
 
         self._build_ui()
+        self.fs_bar = FullscreenBar(self)
+        self.fs_bar.btn_play.clicked.connect(self.toggle_pause)
+        self.fs_bar.slider.seekRequested.connect(self._seek_fraction)
+        self.fs_bar.vol_slider.volumeRequested.connect(self.set_volume)
 
         self.bridge = MpvBridge()
         self.bridge.eof.connect(self._on_eof)
@@ -324,6 +409,7 @@ class MainWindow(QMainWindow):
         self.video = VideoWidget()
         self.video.doubleClicked.connect(self.toggle_fullscreen)
         self.video.rightClicked.connect(self._show_file_info)
+        self.video.wheeled.connect(lambda d: self.change_volume(d * VOLUME_STEP))
 
         self.btn_play = QToolButton()
         self.btn_play.setText("▶")
@@ -338,6 +424,9 @@ class MainWindow(QMainWindow):
         self.slider = ClickSlider()
         self.slider.seekRequested.connect(self._seek_fraction)
         self.lbl_time = QLabel("--:-- / --:--")
+        self.lbl_vol = QLabel("🔊")
+        self.vol_slider = VolumeSlider()
+        self.vol_slider.volumeRequested.connect(self.set_volume)
 
         self.lbl_name = QLabel("폴더를 열거나 이 창에 끌어다 놓으세요")
         self.lbl_name.setMinimumWidth(50)
@@ -363,6 +452,8 @@ class MainWindow(QMainWindow):
         row1.addWidget(self.btn_stop)
         row1.addWidget(self.slider, 1)
         row1.addWidget(self.lbl_time)
+        row1.addWidget(self.lbl_vol)
+        row1.addWidget(self.vol_slider)
         row2 = QHBoxLayout()
         row2.addWidget(self.lbl_name, 1)
         row2.addWidget(self.lbl_msg)
@@ -391,6 +482,8 @@ class MainWindow(QMainWindow):
         self.listw.setFocusPolicy(Qt.NoFocus)
         self.listw.itemDoubleClicked.connect(self._on_list_double_click)
         self.listw.filesDropped.connect(self.add_to_playlist)
+        self.listw.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.listw.customContextMenuRequested.connect(self._show_list_menu)
 
         def mkbtn(text, slot):
             b = QToolButton()
@@ -554,10 +647,48 @@ class MainWindow(QMainWindow):
         self.listw.clear()
         self._now_playing_item = None  # clear()가 기존 아이템을 C++ 쪽에서 파괴하므로 참조도 함께 정리
         for p in self.files:
-            item = QListWidgetItem(self._display_name(p))
-            item.setData(Qt.UserRole, p)
-            item.setToolTip(p)
-            self.listw.addItem(item)
+            self.listw.addItem(self._make_item(p))
+
+    def _item_text(self, path):
+        return ("✔ " if path in self.watched else "") + self._display_name(path)
+
+    def _make_item(self, path):
+        item = QListWidgetItem(self._item_text(path))
+        item.setData(Qt.UserRole, path)
+        item.setToolTip(path)
+        return item
+
+    def _set_watched(self, paths, value):
+        changed = False
+        for p in paths:
+            if (p in self.watched) != value:
+                changed = True
+                if value:
+                    self.watched.add(p)
+                else:
+                    self.watched.discard(p)
+                if p in self.files:
+                    self.listw.item(self.files.index(p)).setText(self._item_text(p))
+        if changed:
+            self.settings["watched"] = sorted(self.watched)
+            self._save_settings()
+
+    def _show_list_menu(self, point):
+        sel = self._selected_paths()
+        m = QMenu(self)
+        a_on = m.addAction("선택 항목 '본 파일' 표시")
+        a_off = m.addAction("선택 항목 표시 해제")
+        m.addSeparator()
+        a_all = m.addAction("이 목록의 표시 전부 해제")
+        a_on.setEnabled(bool(sel))
+        a_off.setEnabled(bool(sel))
+        act = m.exec(self.listw.viewport().mapToGlobal(point))
+        if act is a_on:
+            self._set_watched(sel, True)
+        elif act is a_off:
+            self._set_watched(sel, False)
+        elif act is a_all:
+            self._set_watched(list(self.files), False)
 
     def _mark_now_playing(self, item):
         """재생 중 표시는 글자 굵기/색으로 - Qt의 selection과 분리해서, 재생목록 항목을 선택해 지울 때
@@ -650,10 +781,7 @@ class MainWindow(QMainWindow):
         new_paths.sort(key=natural_key)
         self.files.extend(new_paths)
         for p in new_paths:
-            item = QListWidgetItem(self._display_name(p))
-            item.setData(Qt.UserRole, p)
-            item.setToolTip(p)
-            self.listw.addItem(item)
+            self.listw.addItem(self._make_item(p))
         if self.random_mode:
             insert_at = self.pos + 1 if self.pos >= 0 else len(self.order)
             shuffled = new_paths[:]
@@ -767,23 +895,44 @@ class MainWindow(QMainWindow):
         self.flash(f"재생목록 열림: {os.path.basename(path)} ({len(files)}개)")
 
     # ---------------------------------------------------------------- 삭제
+    def delete_selected_or_current(self, permanent):
+        """재생목록에서 드래그/Ctrl 로 선택한 항목이 있으면 그것들을, 없으면 지금 재생 중인 영상을 지운다."""
+        paths = self._selected_paths()
+        if not paths and self.current:
+            paths = [self.current]
+        self.delete_paths(paths, permanent)
+
     def delete_current(self, permanent):
-        path = self.current
-        if not path:
+        if self.current:
+            self.delete_paths([self.current], permanent)
+
+    def delete_paths(self, paths, permanent):
+        if not paths:
             return
-        # 1) 목록에서 빼고 다음 영상으로 먼저 전환 (재생 중 파일 잠금 회피)
-        row = self.files.index(path) if path in self.files else -1
-        if row >= 0:
-            self.files.pop(row)
-            self.listw.takeItem(row)
-        self.order.pop(self.pos)
-        if self.rotations.pop(path, None) is not None:
+        gone = set(paths)
+        removed_current = self.current in gone
+        # 1) 목록에서 먼저 빼고 (현재 영상이 지워지면) 다음 영상으로 전환 (재생 중 파일 잠금 회피)
+        rows = sorted((i for i, p in enumerate(self.files) if p in gone), reverse=True)
+        for row in rows:
+            item = self.listw.takeItem(row)
+            if item is self._now_playing_item:
+                self._now_playing_item = None
+        self.files = [p for p in self.files if p not in gone]
+        kept_before = sum(1 for p in self.order[:max(self.pos, 0)] if p not in gone)
+        cur = self.current
+        self.order = [p for p in self.order if p not in gone]
+        changed = False
+        for p in paths:
+            if self.rotations.pop(p, None) is not None:
+                changed = True
+        if changed:
             self._save_settings()
 
         if not self.order:
             self.pos = -1
             self.player.command("stop")
-        else:
+        elif removed_current:
+            self.pos = kept_before
             if self.pos >= len(self.order):
                 if self.random_mode:
                     self.order = self.files[:]
@@ -792,10 +941,13 @@ class MainWindow(QMainWindow):
                 else:
                     self.pos = len(self.order) - 1
             self.play_current()
+        else:
+            self.pos = self.order.index(cur)
         self._update_labels()
 
         # 2) 잠금이 풀릴 때까지 재시도하며 삭제
-        self.pending_deletes.append([path, permanent, 0])
+        for p in paths:
+            self.pending_deletes.append([p, permanent, 0])
         self._process_deletes()
         if self.pending_deletes:
             self.del_timer.start()
@@ -855,7 +1007,10 @@ class MainWindow(QMainWindow):
             self.player.seek(frac * 100, "absolute-percent", "exact" if exact else "keyframes")
 
     def change_volume(self, delta):
-        vol = max(0, min(VOLUME_MAX, round(self.player.volume) + delta))
+        self.set_volume(round(self.player.volume) + delta)
+
+    def set_volume(self, vol):
+        vol = max(0, min(VOLUME_MAX, int(vol)))
         self.player.volume = vol
         self.settings["volume"] = vol
         self.volume_save_timer.start()  # 연타/길게 누름 중 매번 디스크에 쓰지 않도록 묶어서 저장
@@ -904,6 +1059,12 @@ class MainWindow(QMainWindow):
         self._update_mode_label()
         self.player.show_text(f"회전 {deg}°", "1000")
 
+    def reset_rotation(self):
+        if self.current and self.rotations.get(self.current, 0):
+            self.rotate(-self.rotations[self.current])
+        else:
+            self.player.show_text("회전 0°", "1000")
+
     def toggle_fullscreen(self):
         if self.isFullScreen():
             self.exit_fullscreen()
@@ -916,6 +1077,7 @@ class MainWindow(QMainWindow):
     def exit_fullscreen(self):
         if not self.isFullScreen():
             return
+        self.fs_bar.hide()
         self.bar.show()
         self.right_panel.show()
         self.video.unsetCursor()
@@ -968,7 +1130,7 @@ class MainWindow(QMainWindow):
             self.next_video()
         elif vk == VK_DELETE:
             if not ev.isAutoRepeat():
-                self.delete_current(permanent=shift)
+                self.delete_selected_or_current(permanent=shift)
         elif vk == VK_SPACE:
             if not ev.isAutoRepeat():
                 self.toggle_pause()
@@ -984,6 +1146,9 @@ class MainWindow(QMainWindow):
         elif vk == VK_P:
             if not ev.isAutoRepeat():
                 self.rotate(-90 if shift else 90)
+        elif vk == VK_OEM_4:
+            if not ev.isAutoRepeat():
+                self.reset_rotation()
         elif vk in (VK_F, VK_RETURN):
             if not ev.isAutoRepeat():
                 self.toggle_fullscreen()
@@ -1021,6 +1186,8 @@ class MainWindow(QMainWindow):
 
     def _on_file_loaded(self):
         self.consecutive_errors = 0
+        if self.current:
+            self._set_watched([self.current], True)
         disable_child_windows(int(self.video.winId()))
 
     def _mpv_get(self, name, default=None):
@@ -1206,6 +1373,9 @@ class MainWindow(QMainWindow):
         if deg:
             parts.append(f"회전 {deg}°")
         vol = round(self.player.volume) if hasattr(self, "player") else 100
+        for sl in (self.vol_slider, self.fs_bar.vol_slider):
+            if sl.value() != vol:
+                sl.setValue(vol)
         if vol != 100:
             parts.append(f"볼륨 {vol}%")
         self.lbl_mode.setText("  ".join(parts))
@@ -1222,23 +1392,40 @@ class MainWindow(QMainWindow):
                 t = d = paused = None
             pct = f"  ({t / d * 100:.0f}%)" if d and t is not None else ""
             self.lbl_time.setText(f"{fmt_time(t)} / {fmt_time(d)}{pct}")
+            self.fs_bar.lbl_time.setText(self.lbl_time.text())
             # 버튼은 "누르면 일어날 동작"을 보여줌: 재생 중엔 일시정지 아이콘, 멈춰 있으면 재생 아이콘
             self.btn_play.setText("▶" if (t is None or paused) else "❚❚")
-            if d and t is not None and not self.slider.dragging:
-                self.slider.setValue(int(t / d * 1000))
+            self.fs_bar.btn_play.setText(self.btn_play.text())
+            if d and t is not None:
+                for sl in (self.slider, self.fs_bar.slider):
+                    if not sl.dragging:
+                        sl.setValue(int(t / d * 1000))
         else:
             self.btn_play.setText("▶")
+            self.fs_bar.btn_play.setText("▶")
 
         # 전체화면에서 마우스가 2초간 멈추면 커서 숨김
         if self.isFullScreen():
             pos = QCursor.pos()
+            geo = self.screen().geometry()
+            # 마우스를 화면 아래쪽으로 가져가면 재생바가 뜨고, 위로 올리면 사라진다 (드래그 중에는 유지)
+            zone = FullscreenBar.HEIGHT + (30 if self.fs_bar.isVisible() else 0)
+            near_bottom = geo.contains(pos) and pos.y() >= geo.y() + geo.height() - zone
+            if near_bottom or self.fs_bar.slider.dragging or self.fs_bar.vol_slider._drag:
+                if not self.fs_bar.isVisible():
+                    self.fs_bar.place_on(geo)
+                    self.fs_bar.show()
+                self._cursor_idle_ticks = 0
+                self.video.unsetCursor()
+            elif self.fs_bar.isVisible():
+                self.fs_bar.hide()
             if pos != self._last_cursor_pos:
                 self._last_cursor_pos = pos
                 self._cursor_idle_ticks = 0
                 self.video.unsetCursor()
             else:
                 self._cursor_idle_ticks += 1
-                if self._cursor_idle_ticks == 10:
+                if self._cursor_idle_ticks == 10 and not self.fs_bar.isVisible():
                     self.video.setCursor(Qt.BlankCursor)
 
     # ---------------------------------------------------------------- 드래그 앤 드롭 / 종료
