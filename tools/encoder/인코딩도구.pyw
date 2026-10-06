@@ -293,7 +293,12 @@ class App(tk.Tk):
         self.q = queue.Queue()     # 워커 -> UI 메시지
         self.proc = None
         self.stop_flag = False
-        self.busy = False
+        self.busy = False          # 스캔 중
+        self.encoding = False      # 인코딩 중 (이때도 파일 추가/대기 항목 삭제 가능)
+        self.queue = []            # 대기열: 작업 목록 [[iid, ...], ...] (합치기는 iid 여러 개). 접근은 qlock 으로
+        self.qlock = threading.Lock()
+        self.worker_alive = False
+        self.cur_job = []          # 지금 인코딩 중인 iid 들
         self.sort_rev = {}
         self._sum_pending = False
         self._ui()
@@ -377,6 +382,9 @@ class App(tk.Tk):
         self.msg.pack(side="left")
         self.btn_stop = ttk.Button(row, text="중지", command=self.stop, state="disabled")
         self.btn_stop.pack(side="right")
+        self.btn_rm_pending = ttk.Button(row, text="대기 항목 모두 제거", command=self.remove_pending,
+                                         state="disabled")
+        self.btn_rm_pending.pack(side="right", padx=6)
         self.btn_go = ttk.Button(row, text="선택 항목 인코딩 시작", command=self.start)
         self.btn_go.pack(side="right", padx=6)
 
@@ -506,7 +514,17 @@ class App(tk.Tk):
         col = self.tree.identify_column(e.x)
         if col in ("#1", "#2"):
             iid = self.tree.identify_row(e.y)
-            if iid and not self.busy:
+            if iid and self.encoding:
+                # 인코딩 중에는 체크로 대기열에 넣고 빼는 것만 가능 (진행 중인 항목/합치기 표시는 변경 불가)
+                it = self.items[iid]
+                if col == "#1" and iid not in self.cur_job:
+                    it["checked"] = not it["checked"]
+                    if it["checked"]:
+                        self._enqueue([iid])
+                    else:
+                        self._dequeue(iid)
+                    self.refresh(iid)
+            elif iid and not self.busy:
                 it = self.items[iid]
                 if col == "#1":
                     it["checked"] ^= True
@@ -540,7 +558,7 @@ class App(tk.Tk):
             self.refresh(iid)
 
     def mark_merge(self, v):
-        if self.busy:
+        if self.busy or self.encoding:
             return
         for iid in self.tree.selection():
             self.items[iid]["merge"] = v
@@ -550,7 +568,7 @@ class App(tk.Tk):
 
     def move_selected(self, delta):
         """선택한 행을 위/아래로 한 칸 이동 (합치기는 목록에 보이는 순서대로 이어 붙인다)."""
-        if self.busy:
+        if self.busy or self.encoding:
             return
         order = self.tree.get_children()
         sel = [i for i in order if i in self.tree.selection()]
@@ -566,12 +584,59 @@ class App(tk.Tk):
         for iid in sel:
             self.tree.move(iid, "", self.tree.index(iid) + delta)
 
+    def _enqueue(self, iids):
+        """인코딩 중 대기열 맨 뒤에 추가 (작업자가 이미 끝나는 중이면 추가하지 않음 - 다시 시작을 눌러야 함)."""
+        with self.qlock:
+            if not self.worker_alive:
+                return
+            self.queue.append(list(iids))
+        for i in iids:
+            self.items[i]["status"] = "대기 중"
+            self.refresh(i)
+
+    def _dequeue(self, iid):
+        """대기열에서 항목을 뺀다. 이미 인코딩이 시작된 항목은 영향 없음."""
+        with self.qlock:
+            for job in self.queue:
+                if iid in job:
+                    job.remove(iid)
+            self.queue[:] = [j for j in self.queue if j]
+        it = self.items.get(iid)
+        if it and it["status"] == "대기 중":
+            it["status"] = ""
+
+    def remove_pending(self):
+        """인코딩 중 아직 시작하지 않은(대기 중인) 항목을 전부 목록에서 제거."""
+        with self.qlock:
+            ids = [i for job in self.queue for i in job]
+        if not ids:
+            self.msg.config(text="대기 중인 항목이 없습니다")
+            return
+        if not messagebox.askyesno("대기 항목 제거",
+                                   f"아직 인코딩하지 않은 대기 항목 {len(ids)}개를 목록에서 제거합니다.\n"
+                                   f"(파일은 지우지 않고 지금 인코딩 중인 것은 계속합니다)\n\n진행할까요?"):
+            return
+        for iid in ids:
+            self._dequeue(iid)
+            if iid in self.items and iid not in self.cur_job:
+                self.items.pop(iid)
+                self.tree.delete(iid)
+        self.sched_summary()
+        self.msg.config(text=f"대기 항목 {len(ids)}개 제거")
+
     def remove_selected(self):
         if self.busy:
             return
+        skipped = 0
         for iid in self.tree.selection():
+            if self.encoding and iid in self.cur_job:
+                skipped += 1  # 지금 인코딩 중인 파일은 못 지움
+                continue
+            self._dequeue(iid)
             self.items.pop(iid, None)
             self.tree.delete(iid)
+        if skipped:
+            self.msg.config(text="인코딩 중인 항목은 제거할 수 없습니다 (중지 후 제거)")
         self.sched_summary()
 
     def open_folder(self):
@@ -580,7 +645,7 @@ class App(tk.Tk):
             subprocess.Popen(["explorer", "/select,", self.items[sel[0]]["path"]])
 
     def clear(self):
-        if self.busy:
+        if self.busy or self.encoding:
             return
         self.items.clear()
         self.tree.delete(*self.tree.get_children())
@@ -588,11 +653,15 @@ class App(tk.Tk):
         self.sched_summary()
 
     def set_all(self, v):  # 전체 선택에서도 "예전에 커졌던" 파일은 제외 (직접 체크해야 함)
+        if self.encoding:
+            return
         for iid, it in self.items.items():
             it["checked"] = v and not it.get("bigger")
             self.refresh(iid)
 
     def select_non_hevc(self):
+        if self.encoding:
+            return
         for iid, it in self.items.items():
             it["checked"] = it["info"]["codec"] != "hevc" and it["status"] == "" and not it.get("bigger")
             self.refresh(iid)
@@ -630,7 +699,7 @@ class App(tk.Tk):
         return os.path.join(d, f"{PREFIX}합침_{base}_외{len(its) - 1}개{ext}")
 
     def start(self):
-        if self.busy:
+        if self.busy or self.encoding:
             return
         todo = [iid for iid in self.tree.get_children() if self.items[iid]["checked"]]
         if not todo:
@@ -680,24 +749,38 @@ class App(tk.Tk):
         else:
             jobs = [[i] for i in todo]
         self._save_settings()
-        self.busy = True
+        self.encoding = True
         self.stop_flag = False
+        with self.qlock:
+            self.queue = [list(j) for j in jobs]
+            self.worker_alive = True
+        for job in jobs:
+            for i in job:
+                self.items[i]["status"] = "대기 중"
+                self.refresh(i)
         self.btn_go.config(state="disabled")
         self.btn_stop.config(state="normal")
+        self.btn_rm_pending.config(state="normal")
         enc, qv, pre = self.enc.get(), self.qual.get(), self.preset.get()
-        threading.Thread(target=self._worker, args=(jobs, enc, qv, pre, self.auto_del.get()), daemon=True).start()
+        threading.Thread(target=self._worker, args=(enc, qv, pre, self.auto_del.get()), daemon=True).start()
 
     def stop(self):
         self.stop_flag = True
         if self.proc and self.proc.poll() is None:
             self.proc.kill()
 
-    def _worker(self, jobs, enc, qv, pre, auto_del):
-        total = len(jobs)
+    def _worker(self, enc, qv, pre, auto_del):
+        n = 0
         ok = 0
-        for n, iids in enumerate(jobs, 1):
-            if self.stop_flag:
-                break
+        while True:
+            with self.qlock:
+                if self.stop_flag or not self.queue:
+                    self.worker_alive = False
+                    break
+                iids = self.queue.pop(0)
+                total = n + 1 + len(self.queue)
+            n += 1
+            self.cur_job = iids
             its = [self.items[i] for i in iids]
             merge = len(iids) > 1
             infos = [it["info"] for it in its]
@@ -736,6 +819,7 @@ class App(tk.Tk):
                             pct = min(99, int(line[12:]) / 1e6 / duration * 100)
                         except ValueError:
                             continue
+                        total = n + len(self.queue)  # 인코딩 중 추가/제거된 만큼 전체 개수가 바뀜
                         self.q.put(("prog", iids, pct, (n - 1 + pct / 100) / total * 100, merge))
                     elif "=" not in line or line.startswith(("Error", "[")):
                         tail.append(line)
@@ -781,7 +865,10 @@ class App(tk.Tk):
                 self._rm(part)
                 status("실패")
                 self.q.put(("log", name, "\n".join(tail)))
-        self.q.put(("done", ok, total))
+        with self.qlock:
+            self.worker_alive = False
+        self.cur_job = []
+        self.q.put(("done", ok, n))
 
     @staticmethod
     def _rm(p):
@@ -992,6 +1079,8 @@ class App(tk.Tk):
                     iid = self.tree.insert("", "end")
                     self.items[iid] = it
                     self.refresh(iid)
+                    if self.encoding and it["checked"]:  # 인코딩 중 추가한 파일은 대기열 맨 뒤로
+                        self._enqueue([iid])
                 elif k == "bigger":  # 결과가 원본보다 커서 자동 삭제됨 → 다음 스캔 때도 건너뛰도록 기록
                     it = self.items[m[1]]
                     it["checked"] = False
@@ -1006,11 +1095,15 @@ class App(tk.Tk):
                         self.bigger.pop(it["path"], None)
                     self.refresh(m[1])
                 elif k == "scanmsg" or k == "msg":
-                    self.msg.config(text=m[1])
+                    if k == "msg" or not self.encoding:
+                        self.msg.config(text=m[1])
                 elif k == "scandone":
                     self.busy = False
-                    self.apply_sort()
-                    self.msg.config(text=f"목록 {len(self.items)}개 (스캔 {m[1]}개)")
+                    if self.encoding:  # 인코딩 중에는 정렬하지 않아 새 파일이 맨 뒤에 남음
+                        self.sched_summary()
+                    else:
+                        self.apply_sort()
+                        self.msg.config(text=f"목록 {len(self.items)}개 (스캔 {m[1]}개)")
                 elif k == "status":
                     self.items[m[1]]["status"] = m[2]
                     if not m[2].startswith(("인코딩 중", "합치는 중")):
@@ -1037,10 +1130,17 @@ class App(tk.Tk):
                 elif k == "log":
                     messagebox.showerror("인코딩 실패", f"{m[1]}\n\n{m[2][-1200:]}")
                 elif k == "done":
-                    self.busy = False
+                    self.encoding = False
                     self.proc = None
+                    with self.qlock:
+                        self.queue.clear()
+                    for iid, it in self.items.items():  # 중지로 남은 대기 표시 정리
+                        if it["status"] == "대기 중":
+                            it["status"] = ""
+                            self.refresh(iid)
                     self.btn_go.config(state="normal")
                     self.btn_stop.config(state="disabled")
+                    self.btn_rm_pending.config(state="disabled")
                     self.pb["value"] = 100 if m[1] == m[2] else self.pb["value"]
                     self.msg.config(text=f"끝: {m[1]}/{m[2]}개 완료")
                     if self.after_done.get() == AFTER[1] and not self.stop_flag:

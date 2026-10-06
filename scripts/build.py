@@ -21,7 +21,7 @@ WORK = os.path.join(BUILD, "work")
 CACHE = os.path.join(BUILD, "cache")
 OUT = os.path.join(ROOT, "dist")
 SEVENZR = ("https://www.7-zip.org/a/7zr.exe",
-           "ad4c82fadcbdf93c03b4fc440f300509c7d60c5c2f4d183e35d9d70d6957037d")
+           "256feca8e274e5da655e2a284fabafd9f554365eb164862089dacd4e8276d282")
 
 
 def sha256(path):
