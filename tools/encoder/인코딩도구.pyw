@@ -499,7 +499,7 @@ class App(tk.Tk):
     def _row_values(self, it):
         i = it["info"]
         o = it.get("out")
-        return ("☑" if it["checked"] else "☐", "☑" if it.get("merge") else "☐", it["label"], i["codec"], fmt_rate(i["bitrate"]),
+        return ("☑" if it["checked"] else "☐", str(it["merge"]) if it.get("merge") else "☐", it["label"], i["codec"], fmt_rate(i["bitrate"]),
                 i["res"], fmt_size(i["size"]), fmt_size(o["size"]) if o else "",
                 f"-{100 - o['size'] / i['size'] * 100:.0f}%" if o and o["size"] < i["size"]
                 else (f"+{o['size'] / i['size'] * 100 - 100:.0f}%" if o else ""), it["status"])
@@ -528,8 +528,10 @@ class App(tk.Tk):
                 it = self.items[iid]
                 if col == "#1":
                     it["checked"] ^= True
-                else:  # 합치기 표시 = 인코딩 대상으로도 체크
-                    it["merge"] = not it.get("merge")
+                else:  # 합치기 번호 순환 (☐ → 1 → 2 → … → ☐). 번호가 같은 행끼리 하나로 합쳐짐
+                    top = max((x.get("merge") or 0 for k, x in self.items.items() if k != iid), default=0)
+                    nxt = (it.get("merge") or 0) + 1
+                    it["merge"] = nxt if nxt <= top + 1 else 0
                     if it["merge"]:
                         it["checked"] = True
                 self.refresh(iid)
@@ -543,7 +545,7 @@ class App(tk.Tk):
         m.add_command(label="선택한 행 체크", command=lambda: self.check_selected(True))
         m.add_command(label="선택한 행 체크 해제", command=lambda: self.check_selected(False))
         m.add_separator()
-        m.add_command(label="선택한 행 합치기 (체크 + 합치기 표시)", command=lambda: self.mark_merge(True))
+        m.add_command(label="선택한 행을 하나로 합치기 (새 묶음)", command=lambda: self.mark_merge(True))
         m.add_command(label="선택한 행 합치기 해제", command=lambda: self.mark_merge(False))
         m.add_command(label="위로 이동 (합치는 순서)", command=lambda: self.move_selected(-1))
         m.add_command(label="아래로 이동 (합치는 순서)", command=lambda: self.move_selected(1))
@@ -560,8 +562,10 @@ class App(tk.Tk):
     def mark_merge(self, v):
         if self.busy or self.encoding:
             return
-        for iid in self.tree.selection():
-            self.items[iid]["merge"] = v
+        sel = set(self.tree.selection())
+        new = max((x.get("merge") or 0 for k, x in self.items.items() if k not in sel), default=0) + 1
+        for iid in sel:
+            self.items[iid]["merge"] = new if v else 0
             if v:
                 self.items[iid]["checked"] = True
             self.refresh(iid)
@@ -676,7 +680,7 @@ class App(tk.Tk):
             it = self.items[iid]
             i = it["info"]
             o = it.get("out")
-            return {"sel": it["checked"], "merge": bool(it.get("merge")), "name": it["label"].lower(),
+            return {"sel": it["checked"], "merge": it.get("merge") or 0, "name": it["label"].lower(),
                     "codec": i["codec"], "bitrate": i["bitrate"], "res": i["res"], "size": i["size"],
                     "outsize": o["size"] if o else 0, "ratio": o["size"] / i["size"] if o else 9,
                     "status": it["status"]}[col]
@@ -723,27 +727,37 @@ class App(tk.Tk):
                 todo = [i for i in todo if i not in warn]
                 if not todo:
                     return
-        # 작업 목록: 합치기 표시된 항목(2개 이상)은 목록 순서대로 하나의 작업, 나머지는 각각 하나씩
-        merge_ids = [i for i in todo if self.items[i].get("merge")]
-        if len(merge_ids) >= 2:
-            its = [self.items[i] for i in merge_ids]
-            res = sorted({it["info"]["res"] for it in its})
-            order = "\n".join(f"{n}. {it['label']}" for n, it in enumerate(its[:12], 1))
-            more = f"\n… 외 {len(its) - 12}개" if len(its) > 12 else ""
-            note = (f"\n\n※ 해상도가 서로 다릅니다 ({', '.join(res)}). 첫 영상({its[0]['info']['res']}) 크기에 맞추고 "
-                    f"남는 곳은 검은 여백이 됩니다." if len(res) > 1 else "")
+        # 작업 목록: 같은 합치기 번호의 항목(2개 이상)은 목록 순서대로 하나의 작업, 나머지는 각각 하나씩
+        groups = {}
+        for i in todo:
+            g = self.items[i].get("merge") or 0
+            if g:
+                groups.setdefault(g, []).append(i)
+        groups = {g: ids for g, ids in groups.items() if len(ids) >= 2}
+        if groups:
+            blocks = []
+            for g, ids in sorted(groups.items()):
+                its = [self.items[i] for i in ids]
+                lines = "\n".join(f"   {n}. {it['label']}" for n, it in enumerate(its[:8], 1))
+                more = f"\n   … 외 {len(its) - 8}개" if len(its) > 8 else ""
+                res = sorted({it["info"]["res"] for it in its})
+                warn = (f"\n   ※ 해상도가 다름 ({', '.join(res)}) → 첫 영상 {its[0]['info']['res']} 기준, 남는 곳은 검은 여백"
+                        if len(res) > 1 else "")
+                blocks.append(f"[묶음 {g}] {len(its)}개 → {os.path.basename(self.merge_path(its))}\n{lines}{more}{warn}")
+            n_single = len(todo) - sum(len(v) for v in groups.values())
             if not messagebox.askokcancel(
                     "합치기",
-                    f"합치기 표시된 {len(its)}개를 아래 순서로 이어 붙여 파일 1개로 인코딩합니다.\n\n{order}{more}\n\n"
-                    f"결과: {os.path.basename(self.merge_path(its))}{note}\n\n"
-                    f"나머지 {len(todo) - len(its)}개는 각각 따로 인코딩합니다.\n(합치면 자막/챕터는 버려지고 음성은 AAC로 다시 인코딩됩니다)"):
+                    f"합치기 묶음 {len(groups)}개를 각각 파일 1개로 이어 붙여 인코딩합니다.\n\n" + "\n\n".join(blocks)
+                    + f"\n\n나머지 {n_single}개는 각각 따로 인코딩합니다.\n"
+                    f"(합치면 자막/챕터는 버려지고 음성은 AAC로 다시 인코딩됩니다)"):
                 return
-            jobs, placed = [], False
+            jobs, placed = [], set()
             for i in todo:
-                if i in merge_ids:
-                    if not placed:
-                        jobs.append(merge_ids)
-                        placed = True
+                g = self.items[i].get("merge") or 0
+                if g in groups:
+                    if g not in placed:
+                        jobs.append(groups[g])
+                        placed.add(g)
                 else:
                     jobs.append([i])
         else:
@@ -1064,7 +1078,7 @@ class App(tk.Tk):
                     _, path, info, root = m
                     label = os.path.relpath(path, root) if root else os.path.basename(path)
                     it = {"path": path, "info": info, "checked": info["codec"] != "hevc",
-                          "status": "", "label": label, "merge": False}
+                          "status": "", "label": label, "merge": 0}
                     dst = self.out_path(path)
                     if os.path.exists(dst):  # 이전에 만든 결과가 있으면 비교 대상으로 연결
                         it["out"] = {"path": dst, "size": os.path.getsize(dst)}
