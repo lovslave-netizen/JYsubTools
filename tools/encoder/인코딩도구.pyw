@@ -177,7 +177,7 @@ SORTS = {
                                     it["label"].lower()), False),
     "비트레이트 높은순": (lambda it: it["info"]["bitrate"], True),
     "크기 큰순": (lambda it: it["info"]["size"], True),
-    "감소율 큰순": (lambda it: (1 - it["out"]["size"] / it["info"]["size"]) if it.get("out") else -9, True),
+    "감소율 큰순": (lambda it: (1 - out_view(it)[0] / out_view(it)[1]) if out_view(it) else -9, True),
 }
 AFTER = ("아무것도 안 함", "시스템 종료")
 PRESETS = ("slow", "medium", "fast")
@@ -218,6 +218,15 @@ def cached_probe(path, cache):
     if info:
         cache[key] = {"size": st.st_size, "mtime": st.st_mtime, "info": info}
     return info, 0
+
+
+def out_view(it):
+    """(결과 크기, 비교할 원본 크기). 일반 결과는 그 파일 기준, 합친 결과는 묶음 원본 합계 기준. 없으면 None."""
+    if it.get("out"):
+        return it["out"]["size"], it["info"]["size"]
+    if it.get("mout"):
+        return it["mout"]["size"], it["mout"]["orig_size"]
+    return None
 
 
 def build_cmd(src, dst, enc, q, preset, info):
@@ -428,10 +437,12 @@ class App(tk.Tk):
     def _load_settings(self):
         self.speed = {}
         self.bigger = {}
+        self.merges = {}  # 합친 결과 파일 경로 -> {members:[{path,size,mtime}], size, orig_size, orig_dur}
         try:
             with open(SETTINGS, encoding="utf-8") as f:
                 s = json.load(f)
             self.bigger = s.get("bigger", {})
+            self.merges = s.get("merges", {})
             self.auto_del.set(bool(s.get("auto_del", True)))
             self.speed = {k: float(v) for k, v in s.get("speed", {}).items()}
             if s.get("enc") in ENCODERS:
@@ -446,7 +457,7 @@ class App(tk.Tk):
         try:
             with open(SETTINGS, "w", encoding="utf-8") as f:
                 json.dump({"enc": self.enc.get(), "q": self.qual.get(), "preset": self.preset.get(),
-                           "speed": self.speed, "bigger": self.bigger,
+                           "speed": self.speed, "bigger": self.bigger, "merges": self.merges,
                            "auto_del": self.auto_del.get()}, f)
         except Exception:
             pass
@@ -498,11 +509,11 @@ class App(tk.Tk):
 
     def _row_values(self, it):
         i = it["info"]
-        o = it.get("out")
+        ov = out_view(it)  # (결과 크기, 비교 기준 원본 크기)
         return ("☑" if it["checked"] else "☐", str(it["merge"]) if it.get("merge") else "☐", it["label"], i["codec"], fmt_rate(i["bitrate"]),
-                i["res"], fmt_size(i["size"]), fmt_size(o["size"]) if o else "",
-                f"-{100 - o['size'] / i['size'] * 100:.0f}%" if o and o["size"] < i["size"]
-                else (f"+{o['size'] / i['size'] * 100 - 100:.0f}%" if o else ""), it["status"])
+                i["res"], fmt_size(i["size"]), fmt_size(ov[0]) if ov else "",
+                f"-{100 - ov[0] / ov[1] * 100:.0f}%" if ov and ov[0] < ov[1]
+                else (f"+{ov[0] / ov[1] * 100 - 100:.0f}%" if ov else ""), it["status"])
 
     def refresh(self, iid):
         self.tree.item(iid, values=self._row_values(self.items[iid]))
@@ -679,10 +690,10 @@ class App(tk.Tk):
         def key(iid):
             it = self.items[iid]
             i = it["info"]
-            o = it.get("out")
+            ov = out_view(it)
             return {"sel": it["checked"], "merge": it.get("merge") or 0, "name": it["label"].lower(),
                     "codec": i["codec"], "bitrate": i["bitrate"], "res": i["res"], "size": i["size"],
-                    "outsize": o["size"] if o else 0, "ratio": o["size"] / i["size"] if o else 9,
+                    "outsize": ov[0] if ov else 0, "ratio": ov[0] / ov[1] if ov else 9,
                     "status": it["status"]}[col]
 
         rev = self.sort_rev[col] = not self.sort_rev.get(col, True)
@@ -870,7 +881,7 @@ class App(tk.Tk):
                     continue
                 if merge:
                     self.q.put(("mout", iids, dst, new, orig_size, duration))
-                    status("합침 완료")
+                    status(f"합침 완료 (-{100 - new / orig_size * 100:.0f}%)")
                 else:
                     self.q.put(("out", iids[0], dst))
                     status("완료")
@@ -942,6 +953,25 @@ class App(tk.Tk):
         it["bigger"] = rec
         self._save_settings()
 
+    def _merge_record(self, path):
+        """이 파일이 예전에 합쳐서 인코딩된 적이 있고(원본이 그대로이고 결과 파일도 그대로면) 그 기록을 돌려준다."""
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        for out, r in self.merges.items():
+            mem = next((x for x in r["members"] if x["path"] == path), None)
+            if not mem or mem["size"] != st.st_size or mem["mtime"] != st.st_mtime:
+                continue
+            try:
+                if os.path.getsize(out) != r["size"]:
+                    continue
+            except OSError:
+                continue
+            return {"path": out, "size": r["size"], "orig_size": r["orig_size"], "orig_dur": r["orig_dur"],
+                    "members": [x["path"] for x in r["members"]]}
+        return None
+
     def _was_bigger(self, path):
         b = self.bigger.get(path)
         try:
@@ -985,8 +1015,9 @@ class App(tk.Tk):
         self.msg.config(text=f"커진 결과 {len(cand) - fails}개 삭제" + (f" (실패 {fails})" if fails else ""))
 
     def delete_originals(self):
-        """줄어든 결과가 있는 원본 중 체크된 것을 휴지통으로. 길이가 다르면 안전상 제외."""
-        cand, skipped, merged_ok = [], [], {}
+        """줄어든 결과가 있는 원본 중 체크된 것을 휴지통으로. 길이가 다르면 안전상 제외.
+        합쳐서 인코딩한 묶음은 멤버 중 하나만 체크해도 묶음 전체 원본을 지운다 (합친 결과를 검증한 뒤)."""
+        cand, skipped, merged_ok, groups = [], [], {}, {}
         for iid in self.tree.get_children():
             it = self.items[iid]
             o = it.get("out")
@@ -996,14 +1027,17 @@ class App(tk.Tk):
                     mi = probe(m["path"]) if os.path.exists(m["path"]) else None
                     if m["size"] >= m["orig_size"]:
                         merged_ok[m["path"]] = "합친 결과가 안 줄어듦"
-                    elif not mi or abs(mi["duration"] - m["orig_dur"]) > max(2, 0.5 * m["count"]):
+                    elif not mi or abs(mi["duration"] - m["orig_dur"]) > max(2, 0.5 * len(m["members"])):
                         merged_ok[m["path"]] = "합친 결과 길이 불일치/손상"
                     else:
                         merged_ok[m["path"]] = ""
-                if merged_ok[m["path"]]:
+                        # 묶음 전체: 목록에 남아 있는 멤버를 전부 대상으로 (체크 여부와 상관없이)
+                        for k, x in self.items.items():
+                            if x.get("mout") and x["mout"]["path"] == m["path"] and k not in [c[0] for c in cand]:
+                                cand.append((k, x))
+                        groups[m["path"]] = m
+                if merged_ok[m["path"]] and it["label"] not in " ".join(skipped):
                     skipped.append(f"{it['label']}  ({merged_ok[m['path']]})")
-                else:
-                    cand.append((iid, it))
                 continue
             if not it["checked"] or not o:
                 continue
@@ -1020,13 +1054,16 @@ class App(tk.Tk):
                                 + ("\n\n제외:\n" + "\n".join(skipped[:10]) if skipped else ""))
             return
         saved = sum(it["info"]["size"] - it["out"]["size"] for _, it in cand if it.get("out"))
-        groups = {}
-        for _, it in cand:
-            if not it.get("out") and it.get("mout"):
-                g = groups.setdefault(it["mout"]["path"], [0, it["mout"]["size"]])
-                g[0] += it["info"]["size"]
-        saved += sum(max(0, a - b) for a, b in groups.values())  # 합친 파일 크기를 뺀 순수 확보 용량
+        lines = []
+        for path, m in groups.items():
+            mem = [it for _, it in cand if it.get("mout") and it["mout"]["path"] == path]
+            orig = sum(it["info"]["size"] for it in mem)
+            saved += max(0, orig - m["size"])  # 합친 파일 크기를 뺀 순수 확보 용량
+            missing = len(m["members"]) - len(mem)
+            lines.append(f"· 합친 묶음 {len(mem)}개 → {os.path.basename(path)}  (-{100 - m['size'] / m['orig_size'] * 100:.0f}%)"
+                         + (f"  ※ 목록에 없는 원본 {missing}개는 삭제 안 됨" if missing > 0 else ""))
         msg = (f"원본 {len(cand)}개를 휴지통으로 보냅니다.\n확보 용량: {fmt_size(saved)}"
+               + ("\n\n" + "\n".join(lines) if lines else "")
                + (f"\n\n제외 {len(skipped)}개:\n" + "\n".join(skipped[:10]) if skipped else ""))
         if not messagebox.askyesno("원본 삭제", msg + "\n\n진행할까요?"):
             return
@@ -1084,6 +1121,12 @@ class App(tk.Tk):
                         it["out"] = {"path": dst, "size": os.path.getsize(dst)}
                         it["checked"] = False
                         it["status"] = "결과 있음"
+                    elif self._merge_record(path):  # 예전에 합쳐서 인코딩한 파일 -> 결과/감소율 복원
+                        mo = self._merge_record(path)
+                        it["mout"] = mo
+                        it["checked"] = False
+                        pct = mo["size"] / mo["orig_size"] * 100 - 100
+                        it["status"] = "합쳐서 인코딩됨 (" + (f"{pct:+.0f}%)" if pct >= 0 else f"-{-pct:.0f}%)")
                     else:
                         rec = self._was_bigger(path)
                         if rec:  # 예전에 인코딩했더니 커졌던 파일 → 기본 제외, 수동으로 체크하면 경고
@@ -1130,10 +1173,20 @@ class App(tk.Tk):
                         self.refresh(iid)
                     self.pb["value"] = m[3]
                 elif k == "mout":  # 합치기 결과: 멤버마다 기록해 두고 '줄어든 원본 삭제'에서 검증해 사용
+                    paths = [self.items[iid]["path"] for iid in m[1]]
+                    rec = {"members": [], "size": m[3], "orig_size": m[4], "orig_dur": m[5]}
+                    for pth in paths:
+                        try:
+                            st = os.stat(pth)
+                            rec["members"].append({"path": pth, "size": st.st_size, "mtime": st.st_mtime})
+                        except OSError:
+                            pass
+                    self.merges[m[2]] = rec
+                    self._save_settings()
                     for iid in m[1]:
                         it = self.items[iid]
                         it["mout"] = {"path": m[2], "size": m[3], "orig_size": m[4], "orig_dur": m[5],
-                                      "count": len(m[1])}
+                                      "members": paths}
                         it["checked"] = False
                         self.refresh(iid)
                 elif k == "speed":  # 파일 하나 끝날 때마다 실측 속도를 이동평균으로 저장

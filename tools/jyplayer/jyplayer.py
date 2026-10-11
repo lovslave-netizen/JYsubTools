@@ -57,6 +57,7 @@ VK_ESCAPE, VK_RETURN, VK_SPACE, VK_PRIOR, VK_NEXT = 0x1B, 0x0D, 0x20, 0x21, 0x22
 VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN, VK_DELETE = 0x25, 0x26, 0x27, 0x28, 0x2E
 VK_F, VK_P, VK_R = 0x46, 0x50, 0x52
 VK_OEM_4 = 0xDB  # [ 키
+VK_J = 0x4A
 VK_C, VK_X = 0x43, 0x58
 VK_MULTIPLY, VK_ADD, VK_SUBTRACT = 0x6A, 0x6B, 0x6D  # 숫자패드 * + -
 ZOOM_STEP = 0.1  # mpv video-zoom 은 로그(2^x) 단위
@@ -1059,6 +1060,23 @@ class MainWindow(QMainWindow):
         self._update_mode_label()
         self.player.show_text(f"회전 {deg}°", "1000")
 
+    def cycle_subtitle(self):
+        """J - 자막 트랙을 끔 -> 1번 -> 2번 ... -> 끔 순으로 바꾼다."""
+        subs = [t for t in (self._mpv_get("track_list") or []) if t.get("type") == "sub"]
+        if not self.current or not subs:
+            self.player.show_text("자막 없음", "1000")
+            return
+        ids = [t["id"] for t in subs]
+        cur = self._mpv_get("sid")
+        nxt = ids[0] if not cur else (ids[ids.index(cur) + 1] if cur in ids and ids.index(cur) + 1 < len(ids) else None)
+        if nxt is None:
+            self.player["sid"] = "no"
+            self.player.show_text("자막 끔", "1000")
+        else:
+            self.player.sid = nxt
+            t = next(x for x in subs if x["id"] == nxt)
+            self.player.show_text(f"자막 {ids.index(nxt) + 1}/{len(ids)}  {t.get('lang') or ''} {t.get('title') or t.get('codec') or ''}".strip(), "1200")
+
     def reset_rotation(self):
         if self.current and self.rotations.get(self.current, 0):
             self.rotate(-self.rotations[self.current])
@@ -1146,6 +1164,9 @@ class MainWindow(QMainWindow):
         elif vk == VK_P:
             if not ev.isAutoRepeat():
                 self.rotate(-90 if shift else 90)
+        elif vk == VK_J:
+            if not ev.isAutoRepeat():
+                self.cycle_subtitle()
         elif vk == VK_OEM_4:
             if not ev.isAutoRepeat():
                 self.reset_rotation()
@@ -1188,6 +1209,13 @@ class MainWindow(QMainWindow):
         self.consecutive_errors = 0
         if self.current:
             self._set_watched([self.current], True)
+        # 기본(default) 표시가 없는 자막(캠코더 MTS 의 PGS 등)은 mpv 가 자동으로 안 켜므로 첫 자막을 켠다
+        subs = [t for t in (self._mpv_get("track_list") or []) if t.get("type") == "sub"]
+        if subs and not self._mpv_get("sid"):
+            try:
+                self.player.sid = subs[0]["id"]
+            except Exception:
+                pass
         disable_child_windows(int(self.video.winId()))
 
     def _mpv_get(self, name, default=None):

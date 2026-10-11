@@ -83,7 +83,8 @@ def latest_version(gh):
 
 def run_in_console(cmd_line):
     """새 콘솔 창에서 명령을 실행하고 끝날 때까지 기다린다 (사용자가 코드/선택을 입력할 수 있게)."""
-    return subprocess.call(["cmd", "/c", cmd_line + " & echo. & pause"], creationflags=NEWCON)
+    # 문자열로 그대로 넘겨야 함: 리스트로 주면 따옴표가 \" 로 바뀌어 "C:\Program Files\...\gh.exe\" 오류가 난다
+    return subprocess.call('cmd /s /c "%s & echo. & pause"' % cmd_line, creationflags=NEWCON)
 
 
 def install_gh_in_console():
