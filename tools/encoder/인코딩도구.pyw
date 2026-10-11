@@ -12,6 +12,7 @@ import threading
 import time
 import datetime
 import queue
+import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -437,6 +438,7 @@ class App(tk.Tk):
     def _load_settings(self):
         self.speed = {}
         self.bigger = {}
+        self._old_linked = 0
         self.merges = {}  # 합친 결과 파일 경로 -> {members:[{path,size,mtime}], size, orig_size, orig_dur}
         try:
             with open(SETTINGS, encoding="utf-8") as f:
@@ -478,6 +480,7 @@ class App(tk.Tk):
         if self.busy:
             return
         self.busy = True
+        self._old_linked = 0
         self.msg.config(text="스캔 중...")
 
         def work():
@@ -490,6 +493,8 @@ class App(tk.Tk):
                                 files.append(os.path.join(root, n))
                 else:
                     files.append(p)
+            merged_found = [os.path.normpath(f) for f in sorted(files)
+                            if os.path.basename(f).startswith(PREFIX + "합침_")]
             known = {it["path"] for it in self.items.values()}
             # 결과 파일(h265_ 접두사)은 원본 행에 연결되므로 목록에서 뺀다
             files = [f for f in sorted(files) if os.path.normpath(f) not in known
@@ -502,6 +507,10 @@ class App(tk.Tk):
                 hits += hit
                 if info:
                     self.q.put(("add", os.path.normpath(f), info, paths[0] if folders else None))
+            for mp in merged_found:  # 이전에 합쳐서 만든 결과: 원본과 짝지어 감소율/원본 삭제에 쓸 수 있게
+                info, hit = cached_probe(mp, cache)
+                if info:
+                    self.q.put(("oldmerge", mp, info))
             save_cache(cache)
             self.q.put(("scandone", len(files)))
 
@@ -953,6 +962,54 @@ class App(tk.Tk):
         it["bigger"] = rec
         self._save_settings()
 
+    def _set_merge(self, iids, out, out_size, orig_size, dur, status=None):
+        """합친 결과를 멤버 항목들에 연결하고 설정에 기록한다 (새로 합쳤을 때 / 예전 결과를 찾았을 때 공용)."""
+        paths = [self.items[i]["path"] for i in iids]
+        rec = {"members": [], "size": out_size, "orig_size": orig_size, "orig_dur": dur}
+        for pth in paths:
+            try:
+                st = os.stat(pth)
+                rec["members"].append({"path": pth, "size": st.st_size, "mtime": st.st_mtime})
+            except OSError:
+                pass
+        self.merges[out] = rec
+        self._save_settings()
+        for iid in iids:
+            it = self.items[iid]
+            it["mout"] = {"path": out, "size": out_size, "orig_size": orig_size, "orig_dur": dur, "members": paths}
+            it["checked"] = False
+            if status:
+                it["status"] = status
+            self.refresh(iid)
+
+    def _link_old_merge(self, path, info):
+        """`h265_합침_<첫파일>_외N개.확장자` 를 같은 폴더의 원본과 짝짓는다. 첫 파일부터 이름순으로 N+1개의 길이
+        합이 합친 결과의 길이와 맞을 때만 연결 (원본 삭제 때 다시 한 번 검증함)."""
+        if path in self.merges:
+            return
+        mt = re.match(r"^" + re.escape(PREFIX) + r"합침_(.+)_외(\d+)개\.(mp4|mkv)$", os.path.basename(path), re.I)
+        if not mt:
+            return
+        base, n = mt.group(1), int(mt.group(2)) + 1
+        d = os.path.normcase(os.path.dirname(path))
+        same = sorted(((k, x) for k, x in self.items.items() if os.path.normcase(os.path.dirname(x["path"])) == d),
+                      key=lambda kx: kx[1]["label"].lower())
+        idx = next((n_ for n_, (k, x) in enumerate(same)
+                    if os.path.splitext(os.path.basename(x["path"]))[0] == base), None)
+        if idx is None:
+            return
+        cand = same[idx: idx + n]
+        if len(cand) != n or any(x.get("mout") for _, x in cand):
+            return
+        dur = sum(x["info"]["duration"] for _, x in cand)
+        if abs(dur - info["duration"]) > max(2, 0.5 * n):
+            return
+        orig = sum(x["info"]["size"] for _, x in cand)
+        pct = info["size"] / orig * 100 - 100
+        self._set_merge([k for k, _ in cand], path, info["size"], orig, dur,
+                        "합쳐서 인코딩됨 (" + (f"+{pct:.0f}%)" if pct >= 0 else f"-{-pct:.0f}%)"))
+        self._old_linked += 1
+
     def _merge_record(self, path):
         """이 파일이 예전에 합쳐서 인코딩된 적이 있고(원본이 그대로이고 결과 파일도 그대로면) 그 기록을 돌려준다."""
         try:
@@ -1160,7 +1217,8 @@ class App(tk.Tk):
                         self.sched_summary()
                     else:
                         self.apply_sort()
-                        self.msg.config(text=f"목록 {len(self.items)}개 (스캔 {m[1]}개)")
+                        self.msg.config(text=f"목록 {len(self.items)}개 (스캔 {m[1]}개)"
+                                        + (f", 이전 합치기 결과 {self._old_linked}개 연결" if self._old_linked else ""))
                 elif k == "status":
                     self.items[m[1]]["status"] = m[2]
                     if not m[2].startswith(("인코딩 중", "합치는 중")):
@@ -1173,22 +1231,9 @@ class App(tk.Tk):
                         self.refresh(iid)
                     self.pb["value"] = m[3]
                 elif k == "mout":  # 합치기 결과: 멤버마다 기록해 두고 '줄어든 원본 삭제'에서 검증해 사용
-                    paths = [self.items[iid]["path"] for iid in m[1]]
-                    rec = {"members": [], "size": m[3], "orig_size": m[4], "orig_dur": m[5]}
-                    for pth in paths:
-                        try:
-                            st = os.stat(pth)
-                            rec["members"].append({"path": pth, "size": st.st_size, "mtime": st.st_mtime})
-                        except OSError:
-                            pass
-                    self.merges[m[2]] = rec
-                    self._save_settings()
-                    for iid in m[1]:
-                        it = self.items[iid]
-                        it["mout"] = {"path": m[2], "size": m[3], "orig_size": m[4], "orig_dur": m[5],
-                                      "members": paths}
-                        it["checked"] = False
-                        self.refresh(iid)
+                    self._set_merge(m[1], m[2], m[3], m[4], m[5])
+                elif k == "oldmerge":
+                    self._link_old_merge(m[1], m[2])
                 elif k == "speed":  # 파일 하나 끝날 때마다 실측 속도를 이동평균으로 저장
                     old = self.speed.get(m[1])
                     self.speed[m[1]] = m[2] if not old else old * 0.5 + m[2] * 0.5
