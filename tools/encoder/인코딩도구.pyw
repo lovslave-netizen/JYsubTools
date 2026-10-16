@@ -1,7 +1,7 @@
 """H.265 인코딩 도구 - 폴더 스캔(하위폴더 포함) → 코덱/비트레이트 확인 → 선택해서 인코딩.
 
-인코더: CPU(libx265) / N150(Intel QSV) / 9070XT(AMD AMF)
-해상도·오디오·자막은 원본 그대로 복사하고 영상 코덱만 H.265로 바꾼다.
+인코더: CPU(libx265) / N150(Intel QSV) / 9070XT(AMD AMF) / CPU AV1(libaom)
+해상도·오디오·자막은 원본 그대로 복사하고 영상 코덱만 H.265(또는 AV1)로 바꾼다.
 ffmpeg/ffprobe는 bin 폴더(빌드 시 exe에 번들)에서 찾는다.
 """
 import json
@@ -26,6 +26,7 @@ ENCODERS = {
     "cpu": ("CPU  (libx265)", 23),
     "qsv": ("N150  (Intel QSV)", 24),
     "amf": ("9070XT  (AMD AMF)", 24),
+    "cpu_av1": ("CPU  (AV1 libaom)", 32),
 }
 
 SETTINGS = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "인코딩도구.json")
@@ -183,6 +184,7 @@ SORTS = {
 AFTER = ("아무것도 안 함", "시스템 종료")
 PRESETS = ("slow", "medium", "fast")
 AMF_QUALITY = {"slow": "quality", "medium": "balanced", "fast": "speed"}
+AV1_CPU_USED = {"slow": "4", "medium": "6", "fast": "8"}  # libaom 속도 (0=가장 느림/고화질, 8=빠름)
 
 
 CACHE = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "인코딩도구_cache.json")
@@ -239,11 +241,19 @@ def build_cmd(src, dst, enc, q, preset, info):
         cmd += ["-map", "0:V", "-map", "0:a?", "-map", "0:s?", "-c:a", "copy", "-c:s", "mov_text"]
     cmd += ["-map_metadata", "0"]
     cmd += enc_args(enc, q, preset, info["tenbit"])
-    cmd += ["-tag:v", "hvc1", dst]
+    cmd += tag_args(enc) + [dst]
     return cmd
 
 
+def tag_args(enc):
+    # hvc1 태그는 HEVC 전용 (mp4 호환). AV1 은 태그 없이 기본값을 쓴다.
+    return [] if enc.endswith("av1") else ["-tag:v", "hvc1"]
+
+
 def enc_args(enc, q, preset, ten):
+    if enc == "cpu_av1":
+        return ["-c:v", "libaom-av1", "-crf", str(q), "-b:v", "0", "-cpu-used", AV1_CPU_USED[preset],
+                "-row-mt", "1", "-pix_fmt", "yuv420p10le" if ten else "yuv420p"]
     if enc == "cpu":
         return ["-c:v", "libx265", "-crf", str(q), "-preset", preset,
                 "-pix_fmt", "yuv420p10le" if ten else "yuv420p"]
@@ -290,7 +300,7 @@ def build_merge_cmd(items, dst, enc, q, preset):
         cmd += ["-map", "[outa]", "-c:a", "aac", "-b:a", "192k"]
     cmd += ["-map_metadata", "0", "-map_chapters", "-1"]
     cmd += enc_args(enc, q, preset, any(i["tenbit"] for _, i in items))
-    cmd += ["-tag:v", "hvc1", dst]
+    cmd += tag_args(enc) + [dst]
     return cmd
 
 
