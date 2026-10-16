@@ -1,6 +1,6 @@
 # JYsubTools — 이어서 작업할 때
 
-setup 하나로 개인 툴(인코딩도구, JYPlayer, PDF압축기 등)을 체크박스로 골라 설치하는 묶음. 비공개 저장소 `lovslave-netizen/JYsubTools`. 진행 기록은 `진행상황.md`.
+setup 하나로 개인 툴(인코딩도구, JYPlayer, PDF압축기 등)을 체크박스로 골라 설치하는 묶음. 공개(public) 저장소 `lovslave-netizen/JYsubTools` (설치 파일 배포·앱 안 업데이트용이라 공개. 소스에 비밀번호·키 넣지 말 것). 진행 기록은 `진행상황.md`.
 
 ## 구조
 - `tools/<id>/` 툴 소스 (py/pyw). 새 툴 추가 = 폴더 + `tools.json` 의 tools 항목 한 개(`deps` 에 필요한 의존성 이름).
@@ -18,7 +18,8 @@ setup 하나로 개인 툴(인코딩도구, JYPlayer, PDF압축기 등)을 체�
 - 테스트 설치는 임시 폴더에 `/VERYSILENT /NOICONS /DIR=...` 로 하고 끝나면 언인스톨. 사용자의 실행 중인 프로세스는 건드리지 않는다.
 - 한국어로 답하고, 확인 못 한 것은 확인 안 했다고 말한다.
 
-## git 위치 (이 PC)
-- W: 에서 git 인덱스가 0바이트로 깨지는 일이 있어(덮어쓰기 쓰기 불안정) git 데이터는 `C:\Users\lovsl\.jysubtools-git` 에 있다. 작업 폴더는 W:\파이썬\JYsubTools. git 명령 전에 `GIT_DIR='C:\Users\lovsl\.jysubtools-git'; GIT_WORK_TREE='W:\파이썬\JYsubTools'` 환경변수를 지정할 것. (W: 쪽 빈 `.git` 폴더는 삭제 대기 상태로 남아 있음)
-- 다른 PC 에서는 GitHub 에서 `git clone` 해서 쓰면 된다.
-- Edit/Write 도구로 W: 의 **기존 파일**을 덮어쓰면 0바이트가 되는 일이 반복됨 -> 스크래치패드에 쓰고 PowerShell(WriteAllText)로 복사하거나, Python/PowerShell 치환 스크립트로 수정. 항상 파일 크기 확인.
+## 이어서 하기 (어느 PC에서나)
+- GitHub(`lovslave-netizen/JYsubTools`, main)가 기준. 새 PC: `gh auth login`(lovslave-netizen) 후 `git clone https://lovslave-netizen@github.com/lovslave-netizen/JYsubTools.git` → 그 폴더에서 `python -I <jyup.py 경로> start`. 올릴 때는 `jyup.py up "요약"`.
+- 개발 환경: Python + `requirements.txt`. JYPlayer/인코딩도구를 실행해 보려면 ffmpeg/libmpv 가 필요하다 → JYsubTools setup 을 한 번 설치해 두면 `%LOCALAPPDATA%\Programs\JYsubToolsin` 에 생긴다. setup 빌드(PyInstaller + Inno Setup)는 지금까지 집 PC 에서만 해 봤다.
+- 빌드/테스트는 로컬 디스크 폴더에서 (W: 같은 네트워크 드라이브에서는 exe 실행이 막힌다).
+- 이 PC(회사 HSB5258)의 `E:\파이썬\JYsubTools` 는 2026-10-16 에 깨진 `.git` 을 새로 만들어 GitHub 와 다시 연결했다. 개발은 주로 집에서 하므로 여기 소스는 GitHub 와 같은 상태.

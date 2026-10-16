@@ -1,6 +1,6 @@
 """JYsubTools 자체 업데이트 (UI 없음, 표준 라이브러리만 사용).
 
-비공개 GitHub 저장소의 Releases 를 gh(GitHub CLI)로 확인/다운로드한다.
+GitHub 저장소(2026-10-16 부터 공개)의 Releases 를 gh(GitHub CLI)로 확인/다운로드한다.
   - 최신 버전 확인: gh release view
   - gh 가 없으면 winget 으로 설치, 로그인이 안 돼 있으면 콘솔 창에서 gh auth login
   - setup 을 받아 /SILENT 로 실행하면 같은 AppId 로 덮어 설치(선택했던 툴/설치 폴더 유지) 후 /LAUNCH 로 다시 실행
