@@ -60,7 +60,9 @@ VK_OEM_4 = 0xDB  # [ 키
 VK_J = 0x4A
 VK_C, VK_X = 0x43, 0x58
 VK_MULTIPLY, VK_ADD, VK_SUBTRACT = 0x6A, 0x6B, 0x6D  # 숫자패드 * + -
+VK_NUMPAD2, VK_NUMPAD4, VK_NUMPAD6, VK_NUMPAD8 = 0x62, 0x64, 0x66, 0x68  # 숫자패드 2 4 6 8 (NumLock 켜진 상태)
 ZOOM_STEP = 0.1  # mpv video-zoom 은 로그(2^x) 단위
+PAN_STEP = 0.05  # 화면 크기 대비 비율 (확대했을 때만 움직임)
 OSD_FONT_SIZE = 22  # 화면에 뜨는 안내 글자 크기 (720p 기준)
 
 # (Ctrl, Shift) -> 이동 초
@@ -1027,7 +1029,27 @@ class MainWindow(QMainWindow):
         if abs(zoom) < 0.005:
             self.player["video-pan-x"] = 0
             self.player["video-pan-y"] = 0
+        self._clamp_pan()
         self.player.show_text(f"확대 {2 ** zoom * 100:.0f}%", "800")
+
+    def _pan_limit(self):
+        """확대한 뒤 화면 가장자리에 검은 여백이 보이지 않도록 허용되는 이동 범위(화면 크기 대비)."""
+        return max(0.0, (2 ** (self._mpv_get("video_zoom") or 0.0) - 1) / 2)
+
+    def _clamp_pan(self, dx=0.0, dy=0.0):
+        limit = self._pan_limit()
+        x = (self._mpv_get("video_pan_x") or 0.0) + dx
+        y = (self._mpv_get("video_pan_y") or 0.0) + dy
+        self.player["video-pan-x"] = max(-limit, min(limit, x))
+        self.player["video-pan-y"] = max(-limit, min(limit, y))
+
+    def pan_video(self, dx=0.0, dy=0.0):
+        if not self.current:
+            return
+        if self._pan_limit() == 0:
+            self.player.show_text("확대한 뒤 숫자패드 2/4/6/8 로 이동", "800")
+            return
+        self._clamp_pan(dx, dy)
 
     def toggle_pause(self):
         if not self.current:
@@ -1142,6 +1164,11 @@ class MainWindow(QMainWindow):
             self.change_zoom(-ZOOM_STEP)
         elif vk == VK_MULTIPLY:
             self.change_zoom(None)
+        elif vk in (VK_NUMPAD2, VK_NUMPAD4, VK_NUMPAD6, VK_NUMPAD8):
+            # 8 위 / 2 아래 / 4 왼쪽 / 6 오른쪽 - 화면(영상)이 그 방향으로 움직인다
+            dx = {VK_NUMPAD4: -PAN_STEP, VK_NUMPAD6: PAN_STEP}.get(vk, 0.0)
+            dy = {VK_NUMPAD8: -PAN_STEP, VK_NUMPAD2: PAN_STEP}.get(vk, 0.0)
+            self.pan_video(dx, dy)
         elif vk == VK_PRIOR:
             self.prev_video()
         elif vk == VK_NEXT:

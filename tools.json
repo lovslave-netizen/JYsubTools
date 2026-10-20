@@ -1,5 +1,5 @@
 {
-  "version": "0.1.7",
+  "version": "0.1.8",
   "app_id": "6F1B2C4E-8A53-4D7B-9C31-5E2A7B90D1A4",
   "deps": {
     "ffmpeg": {
