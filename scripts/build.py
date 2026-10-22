@@ -67,17 +67,20 @@ def pas(s):
     return "'" + s.replace("'", "''") + "'"
 
 
-def make_iss(cfg):
-    tools, deps = cfg["tools"], cfg["deps"]
+def make_iss(cfg, pkg):
+    """패키지 하나(예: JYPlayer, 인코딩도구)의 설치 스크립트. 그 패키지에 든 툴만 넣는다"""
+    tools = [t for t in cfg["tools"] if t["id"] in pkg["tools"]]
+    deps = cfg["deps"]
     ver = cfg["version"]
+    name = pkg["name"]
     L = []
     L.append(f"""[Setup]
-AppId={{{{{cfg['app_id']}}}
-AppName=JYsubTools
+AppId={{{{{pkg['app_id']}}}
+AppName={name}
 AppVersion={ver}
 AppPublisher=JY
-DefaultDirName={{localappdata}}\\Programs\\JYsubTools
-DefaultGroupName=JYsubTools
+DefaultDirName={{localappdata}}\\Programs\\{name}
+DefaultGroupName={name}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -85,8 +88,8 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 OutputDir={OUT}
-OutputBaseFilename=JYsubTools-Setup-{ver}
-UninstallDisplayName=JYsubTools
+OutputBaseFilename={pkg['out']}-{ver}
+UninstallDisplayName={name}
 
 [Languages]
 Name: "korean"; MessagesFile: "compiler:Languages\\Korean.isl"
@@ -180,7 +183,7 @@ Name: "custom"; Description: "선택 설치"; Flags: iscustom
     code += ["    if DepFailures <> '' then",
              "      MsgBox('다음 구성요소를 설치하지 못했습니다:' + DepFailures + #13#10 + 'setup 을 다시 실행하면 다시 시도합니다.', mbError, MB_OK);",
              "  end;", "end;"]
-    path = os.path.join(BUILD, "JYsubTools.iss")
+    path = os.path.join(BUILD, pkg["id"] + ".iss")
     with open(path, "w", encoding="utf-8-sig", newline="\r\n") as f:
         f.write("\n".join(L + code) + "\n")
     return path
@@ -196,19 +199,39 @@ def find_iscc():
     return shutil.which("ISCC") or sys.exit("Inno Setup 6 (ISCC.exe) 를 찾을 수 없습니다")
 
 
+def make_portable(cfg, tool_id):
+    """설치 없이 쓰는 툴: 빌드된 폴더를 그대로 zip 으로 (예: 커진결과정리-0.2.0.zip)"""
+    import zipfile
+    t = next(x for x in cfg["tools"] if x["id"] == tool_id)
+    src = os.path.join(STAGE, t["id"])
+    dest = os.path.join(OUT, f"{t['exe']}-{cfg['version']}.zip")
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
+        for root, _dirs, files in os.walk(src):
+            for fn in files:
+                full = os.path.join(root, fn)
+                z.write(full, os.path.relpath(full, src))         # 빌드 폴더(exe 이름 폴더)를 그대로 넣음
+    print("포터블:", dest)
+    return dest
+
+
 def main():
     cfg = json.load(open(os.path.join(ROOT, "tools.json"), encoding="utf-8"))
     os.makedirs(CACHE, exist_ok=True)
     fetch(SEVENZR[0], os.path.join(CACHE, "7zr.exe"), SEVENZR[1])
     if "--skip-tools" not in sys.argv:
         build_tools(cfg)
-    iss = make_iss(cfg)
-    print("iss:", iss)
     if "--no-compile" in sys.argv:
+        for pkg in cfg["packages"]:
+            print("iss:", make_iss(cfg, pkg))
         return
     os.makedirs(OUT, exist_ok=True)
-    subprocess.run([find_iscc(), iss], check=True)
-    print("완료:", os.path.join(OUT, "JYsubTools-Setup-%s.exe" % cfg["version"]))
+    for tid in cfg.get("portable", []):
+        make_portable(cfg, tid)
+    for pkg in cfg["packages"]:
+        iss = make_iss(cfg, pkg)
+        print("iss:", iss)
+        subprocess.run([find_iscc(), iss], check=True)
+        print("완료:", os.path.join(OUT, "%s-%s.exe" % (pkg["out"], cfg["version"])))
 
 
 if __name__ == "__main__":

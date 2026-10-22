@@ -1,7 +1,7 @@
 name: release
 
 # 릴리스: tools.json 의 version 을 올리고 커밋 -> 같은 번호의 태그를 push (scripts/release.ps1 이 해 줌)
-#   v0.1.1 태그 -> JYsubTools-Setup-0.1.1.exe 가 Releases 에 올라간다.
+#   v0.2.0 태그 -> JYPlayer-Setup-0.2.0.exe, JYEncoder-Setup-0.2.0.exe, 커진결과정리-0.2.0.zip 이 Releases 에 올라간다.
 on:
   push:
     tags: ["v*"]
@@ -45,4 +45,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create $env:GITHUB_REF_NAME dist/JYsubTools-Setup-*.exe --title $env:GITHUB_REF_NAME --generate-notes
+          $files = Get-ChildItem dist -File | Where-Object { $_.Name -match '^(JYPlayer-Setup|JYEncoder-Setup)-.*\.exe$|\.zip$' } | ForEach-Object FullName
+          gh release create $env:GITHUB_REF_NAME $files --title $env:GITHUB_REF_NAME --generate-notes

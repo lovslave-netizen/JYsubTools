@@ -34,5 +34,5 @@ $run = gh run list --repo $repo --workflow release.yml --limit 1 --json database
 gh run watch $run --repo $repo --exit-status
 if ($LASTEXITCODE -ne 0) { throw "Actions 빌드 실패" }
 New-Item -ItemType Directory -Force Setup | Out-Null
-gh release download "v$Version" --repo $repo --pattern "JYsubTools-Setup-*.exe" --dir Setup --clobber
+gh release download "v$Version" --repo $repo --pattern "*" --dir Setup --clobber
 Write-Host "Setup\ 에 저장됨"

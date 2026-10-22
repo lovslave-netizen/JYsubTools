@@ -1,11 +1,11 @@
 # JYsubTools — 이어서 작업할 때
 
-setup 하나로 개인 툴(인코딩도구, JYPlayer, PDF압축기 등)을 체크박스로 골라 설치하는 묶음. 공개(public) 저장소 `lovslave-netizen/JYsubTools` (설치 파일 배포·앱 안 업데이트용이라 공개. 소스에 비밀번호·키 넣지 말 것). 진행 기록은 `진행상황.md`.
+개인 툴을 패키지로 나눠 배포: JYPlayer 설치 파일, 인코딩도구 설치 파일, 커진결과정리 포터블 zip (v0.2.0~). PDF압축기는 이 구성에서 뺌. 공개(public) 저장소 `lovslave-netizen/JYsubTools` (설치 파일 배포·앱 안 업데이트용이라 공개. 소스에 비밀번호·키 넣지 말 것). 진행 기록은 `진행상황.md`.
 
 ## 구조
 - `tools/<id>/` 툴 소스 (py/pyw). 새 툴 추가 = 폴더 + `tools.json` 의 tools 항목 한 개(`deps` 에 필요한 의존성 이름).
 - `tools.json` 이 기준: 버전, 툴 목록, 의존성(ffmpeg, libmpv)의 URL/sha256/설치할 파일.
-- `scripts/build.py` : tools.json → 툴별 PyInstaller(onedir) → Inno Setup 스크립트 생성 → setup 컴파일. 작업 폴더는 로컬(`%LOCALAPPDATA%\JYsubToolsBuild`), 결과는 `dist\`.
+- `scripts/build.py` : tools.json → 툴별 PyInstaller(onedir) → 패키지마다 Inno Setup 스크립트 생성 → 설치 파일 컴파일 (+ `portable` 툴은 zip). 작업 폴더는 로컬(`%LOCALAPPDATA%\JYsubToolsBuild`), 결과는 `dist\`.
 - 설치 폴더 `%LOCALAPPDATA%\Programs\JYsubTools\<id>\` + 공용 `bin\`(ffmpeg, ffprobe, libmpv-2.dll). 툴은 `exe\..\bin` 을 먼저 찾는다.
 - 의존성은 git 에 넣지 않는다(100MB 제한). setup 이 **설치할 때** 선택된 툴에 필요한 것만 받아서(sha256 검증) bin 에 푼다. setup 옆 `deps\` 폴더에 같은 이름의 7z 가 있으면 다운로드 대신 사용.
 - 의존성 주소는 외부 공개 배포처(GyanD/codexffmpeg, shinchiro/mpv-winbuild-cmake). 배포처에서 파일이 사라지면 tools.json 의 URL/해시를 새 버전으로 교체.
