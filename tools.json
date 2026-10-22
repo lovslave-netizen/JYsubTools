@@ -20,9 +20,7 @@
       ]
     }
   ],
-  "portable": [
-    "encoder_clean"
-  ],
+  "portable": [],
   "deps": {
     "ffmpeg": {
       "label": "ffmpeg",
@@ -56,14 +54,6 @@
       "deps": [
         "ffmpeg"
       ]
-    },
-    {
-      "id": "encoder_clean",
-      "name": "커진결과정리",
-      "desc": "인코딩 후 커진 결과 정리",
-      "entry": "tools/encoder/커진결과정리.pyw",
-      "exe": "커진결과정리",
-      "deps": []
     },
     {
       "id": "jyplayer",

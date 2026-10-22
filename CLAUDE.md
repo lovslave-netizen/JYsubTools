@@ -1,6 +1,6 @@
 # JYsubTools — 이어서 작업할 때
 
-개인 툴을 패키지로 나눠 배포: JYPlayer 설치 파일, 인코딩도구 설치 파일, 커진결과정리 포터블 zip (v0.2.0~). PDF압축기는 이 구성에서 뺌. 공개(public) 저장소 `lovslave-netizen/JYsubTools` (설치 파일 배포·앱 안 업데이트용이라 공개. 소스에 비밀번호·키 넣지 말 것). 진행 기록은 `진행상황.md`.
+개인 툴을 패키지로 나눠 배포: JYPlayer 설치 파일, 인코딩도구 설치 파일, (커진결과정리는 v0.2.0 이후 제외). PDF압축기는 이 구성에서 뺌. 공개(public) 저장소 `lovslave-netizen/JYsubTools` (설치 파일 배포·앱 안 업데이트용이라 공개. 소스에 비밀번호·키 넣지 말 것). 진행 기록은 `진행상황.md`.
 
 ## 구조
 - `tools/<id>/` 툴 소스 (py/pyw). 새 툴 추가 = 폴더 + `tools.json` 의 tools 항목 한 개(`deps` 에 필요한 의존성 이름).
