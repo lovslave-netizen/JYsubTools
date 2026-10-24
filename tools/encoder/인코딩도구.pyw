@@ -166,6 +166,7 @@ def probe(path):
         "fps": fps,
         "tenbit": "10" in (v.get("pix_fmt") or ""),
         "duration": dur,
+        "vdur": float(v.get("duration") or dur),  # 영상 자체 길이 (합치기 때 소리를 이 길이에 맞춘다)
         "size": size,
     }
 
@@ -215,7 +216,7 @@ def cached_probe(path, cache):
         return None, 0
     key = os.path.normpath(path)
     c = cache.get(key)
-    if c and c["size"] == st.st_size and c["mtime"] == st.st_mtime and "audio" in c["info"]:
+    if c and c["size"] == st.st_size and c["mtime"] == st.st_mtime and "vdur" in c["info"]:
         return c["info"], 1
     info = probe(path)
     if info:
@@ -282,16 +283,20 @@ def build_merge_cmd(items, dst, enc, q, preset):
     any_audio = any(i.get("audio", True) for _, i in items)
     parts, labels = [], ""
     for n, (_, info) in enumerate(items):
+        # 소리가 영상보다 조금 긴 원본(0.1초 안팎)을 그대로 이으면 파일마다 어긋남이 쌓이므로
+        # 영상과 소리 모두 영상 길이로 맞춘 뒤 이어 붙인다
+        vd = info.get("vdur") or info["duration"]
         vf = f"[{n}:v:0]"
         if not same_res:
             vf += f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,"
-        parts.append(f"{vf}setsar=1,fps={fps}[v{n}]")
+        parts.append(f"{vf}setsar=1,fps={fps},setpts=PTS-STARTPTS,trim=duration={vd:.3f},setpts=PTS-STARTPTS[v{n}]")
         labels += f"[v{n}]"
         if any_audio:
             if info.get("audio", True):
-                parts.append(f"[{n}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a{n}]")
+                parts.append(f"[{n}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                             f"asetpts=PTS-STARTPTS,apad,atrim=duration={vd:.3f},asetpts=PTS-STARTPTS[a{n}]")
             else:
-                parts.append(f"anullsrc=r=48000:cl=stereo,atrim=duration={info['duration']:.3f},"
+                parts.append(f"anullsrc=r=48000:cl=stereo,atrim=duration={vd:.3f},"
                              f"asetpts=PTS-STARTPTS[a{n}]")
             labels += f"[a{n}]"
     parts.append(f"{labels}concat=n={len(items)}:v=1:a={1 if any_audio else 0}[outv]" + ("[outa]" if any_audio else ""))

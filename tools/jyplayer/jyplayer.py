@@ -58,6 +58,7 @@ VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN, VK_DELETE = 0x25, 0x26, 0x27, 0x28, 0x2E
 VK_F, VK_P, VK_R = 0x46, 0x50, 0x52
 VK_OEM_4 = 0xDB  # [ 키
 VK_J = 0x4A
+VK_OEM_COMMA, VK_OEM_PERIOD = 0xBC, 0xBE  # , . 키
 VK_C, VK_X = 0x43, 0x58
 VK_MULTIPLY, VK_ADD, VK_SUBTRACT = 0x6A, 0x6B, 0x6D  # 숫자패드 * + -
 VK_NUMPAD2, VK_NUMPAD4, VK_NUMPAD6, VK_NUMPAD8 = 0x62, 0x64, 0x66, 0x68  # 숫자패드 2 4 6 8 (NumLock 켜진 상태)
@@ -69,6 +70,7 @@ OSD_FONT_SIZE = 22  # 화면에 뜨는 안내 글자 크기 (720p 기준)
 SEEK_STEPS = {(False, False): 5, (False, True): 10, (True, False): 30, (True, True): 60}
 VOLUME_STEP = 5
 VOLUME_MAX = 130
+AUDIO_DELAY_STEP = 0.1  # 소리 싱크 조절 단위(초). . 은 소리를 늦춤, , 는 앞당김
 
 user32 = ctypes.windll.user32
 user32.GetKeyState.restype = ctypes.c_short
@@ -337,6 +339,7 @@ class MainWindow(QMainWindow):
         self.settings = self._load_settings()
         self.rotations = self.settings.setdefault("rotation", {})
         self.random_mode = bool(self.settings.get("random", False))
+        self.audio_delays = self.settings.setdefault("audio_delay", {})  # 파일 경로 -> 소리 싱크(초), 파일마다 저장
         self.watched = set(self.settings.get("watched", []))  # 한 번이라도 재생을 시작한 파일 (재생목록에 ✔ 표시)
 
         self.files = []   # 폴더 내(하위 폴더 포함) 동영상 (자연 정렬)
@@ -719,6 +722,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         self.player["video-rotate"] = self.rotations.get(path, 0)
+        self.player.audio_delay = self.audio_delays.get(path, 0.0)  # 이 파일의 소리 싱크 복원
         self.player.loadfile(path)
         self.player.pause = False
         self._update_labels()
@@ -1020,6 +1024,20 @@ class MainWindow(QMainWindow):
         self.player.show_text(f"볼륨 {vol}%", "800")
         self._update_mode_label()
 
+    def adjust_audio_delay(self, delta):
+        """. 는 소리를 늦추고 , 는 앞당긴다 (0.1초 단위). 파일마다 값을 저장해서 다시 열어도 유지된다."""
+        if not self.current:
+            return
+        new = round(self.audio_delays.get(self.current, 0.0) + delta, 3)
+        self.player.audio_delay = new
+        if abs(new) < 1e-6:
+            self.audio_delays.pop(self.current, None)  # 0이면 기록을 지움
+        else:
+            self.audio_delays[self.current] = new
+        self.volume_save_timer.start()  # 연타해도 디스크에는 잠깐 뒤에 한 번만 씀
+        self._update_mode_label()
+        self.player.show_text(f"소리 싱크 {new:+.1f}초", "1000")
+
     def change_zoom(self, delta):
         """delta=None 이면 원래 크기로."""
         if not self.current:
@@ -1194,6 +1212,10 @@ class MainWindow(QMainWindow):
         elif vk == VK_J:
             if not ev.isAutoRepeat():
                 self.cycle_subtitle()
+        elif vk == VK_OEM_PERIOD:
+            self.adjust_audio_delay(AUDIO_DELAY_STEP)
+        elif vk == VK_OEM_COMMA:
+            self.adjust_audio_delay(-AUDIO_DELAY_STEP)
         elif vk == VK_OEM_4:
             if not ev.isAutoRepeat():
                 self.reset_rotation()
@@ -1427,6 +1449,9 @@ class MainWindow(QMainWindow):
         deg = self.rotations.get(self.current, 0) if self.current else 0
         if deg:
             parts.append(f"회전 {deg}°")
+        d = getattr(self, "audio_delays", {}).get(self.current, 0.0) if self.current else 0.0
+        if abs(d) > 1e-6:
+            parts.append(f"소리 싱크 {d:+.1f}초")
         vol = round(self.player.volume) if hasattr(self, "player") else 100
         for sl in (self.vol_slider, self.fs_bar.vol_slider):
             if sl.value() != vol:
