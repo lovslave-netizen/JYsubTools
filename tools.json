@@ -3,7 +3,7 @@
   "packages": [
     {
       "id": "jyplayer",
-      "name": "JYPlayer",
+      "name": "JY_Player",
       "out": "JYPlayer-Setup",
       "app_id": "E86FA5AE-BE37-48C5-8913-4477900CE61B",
       "tools": [
@@ -12,7 +12,7 @@
     },
     {
       "id": "encoder",
-      "name": "JYEncoder",
+      "name": "JY_Encoder",
       "out": "JYEncoder-Setup",
       "app_id": "22BF5FD9-38CC-4A36-8126-021FF3B358D3",
       "tools": [
@@ -47,21 +47,22 @@
   "tools": [
     {
       "id": "encoder",
-      "name": "JYEncoder",
+      "name": "JY_Encoder",
       "desc": "H.265 인코딩 (ffmpeg 필요)",
       "entry": "tools/encoder/인코딩도구.pyw",
       "exe": "인코딩도구",
       "deps": [
         "ffmpeg"
-      ]
+      ],
+      "icon": "tools/encoder/JY_Encoder.ico"
     },
     {
       "id": "jyplayer",
-      "name": "JYPlayer",
+      "name": "JY_Player",
       "desc": "단축키 중심 동영상 플레이어 (libmpv 필요)",
       "entry": "tools/jyplayer/jyplayer.py",
       "exe": "JYPlayer",
-      "icon": "tools/jyplayer/JYPlayer.ico",
+      "icon": "tools/jyplayer/JY_Player.ico",
       "excludes": [
         "tkinter",
         "numpy",
