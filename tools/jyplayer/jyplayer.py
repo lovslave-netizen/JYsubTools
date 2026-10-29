@@ -332,7 +332,7 @@ class FullscreenBar(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("JYPlayer")
+        self.setWindowTitle("JY_Player")
         self.resize(1280, 800)
         self.setAcceptDrops(True)
 
@@ -1364,10 +1364,10 @@ class MainWindow(QMainWindow):
         return box.get("r")
 
     def _ask(self, text):
-        return QMessageBox.question(self, "JYPlayer 업데이트", text) == QMessageBox.Yes
+        return QMessageBox.question(self, "JY_Player 업데이트", text) == QMessageBox.Yes
 
     def _warn(self, text):
-        QMessageBox.warning(self, "JYPlayer 업데이트", text)
+        QMessageBox.warning(self, "JY_Player 업데이트", text)
 
     def on_update_clicked(self):
         self.btn_update.setEnabled(False)
@@ -1379,7 +1379,7 @@ class MainWindow(QMainWindow):
     def _do_update(self):
         cur = jyupdate.installed_version()
         if not cur:
-            QMessageBox.information(self, "JYPlayer 업데이트", "설치된 JYsubTools 에서만 업데이트할 수 있습니다.")
+            QMessageBox.information(self, "JY_Player 업데이트", "설치된 JY_Player 에서만 업데이트할 수 있습니다.")
             return
         gh = jyupdate.find_gh()
         if not gh:
@@ -1388,7 +1388,7 @@ class MainWindow(QMainWindow):
             self._busy(jyupdate.install_gh_in_console)
             gh = jyupdate.find_gh()
             if not gh:
-                self._warn("gh 를 찾지 못했습니다. 설치가 끝났다면 JYPlayer 를 다시 켠 뒤 시도하세요.")
+                self._warn("gh 를 찾지 못했습니다. 설치가 끝났다면 JY_Player 를 다시 켠 뒤 시도하세요.")
                 return
         if not self._busy(lambda: jyupdate.logged_in(gh)):
             if not self._ask("GitHub 로그인이 필요합니다.\n콘솔 창이 열리면 안내에 따라 로그인하세요. 열까요?"):
@@ -1402,9 +1402,9 @@ class MainWindow(QMainWindow):
             self._warn("최신 버전을 확인하지 못했습니다. (인터넷 연결이나 저장소 접근 권한을 확인하세요)")
             return
         if not jyupdate.is_newer(latest, cur):
-            QMessageBox.information(self, "JYPlayer 업데이트", f"이미 최신 버전입니다. (v{cur})")
+            QMessageBox.information(self, "JY_Player 업데이트", f"이미 최신 버전입니다. (v{cur})")
             return
-        if not self._ask(f"v{cur} → v{latest} 로 업데이트할까요?\n받은 뒤 JYPlayer 가 종료되고 다시 시작됩니다."):
+        if not self._ask(f"v{cur} → v{latest} 로 업데이트할까요?\n받은 뒤 JY_Player 가 종료되고 다시 시작됩니다."):
             return
         self.flash("업데이트 파일을 받는 중...")
         setup = self._busy(lambda: jyupdate.download_setup(gh, latest, "JYPlayer-Setup-*.exe"))
@@ -1430,7 +1430,7 @@ class MainWindow(QMainWindow):
         if path:
             name = self._display_name(path)
             self.lbl_name.setText(name)
-            self.setWindowTitle(f"{os.path.basename(path)} - JYPlayer")
+            self.setWindowTitle(f"{os.path.basename(path)} - JY_Player")
             idx = self.files.index(path) + 1 if path in self.files else 0
             self.lbl_index.setText(f"{idx} / {len(self.files)}")
             self._mark_now_playing(self.listw.item(idx - 1) if idx else None)
@@ -1438,7 +1438,7 @@ class MainWindow(QMainWindow):
                 self.listw.scrollToItem(self.listw.item(idx - 1))
         else:
             self.lbl_name.setText("재생 중인 영상 없음")
-            self.setWindowTitle("JYPlayer")
+            self.setWindowTitle("JY_Player")
             self.lbl_index.setText(f"0 / {len(self.files)}")
             self.lbl_time.setText("--:-- / --:--")
             self.slider.setValue(0)

@@ -332,8 +332,8 @@ class App(tk.Tk):
                 self.after(500, poll)
                 return
             if latest and jyupdate.is_newer(latest, cur):
-                if messagebox.askyesno("인코딩도구 업데이트",
-                                       f"v{cur} → v{latest} 로 업데이트할까요?\n받은 뒤 인코딩도구가 종료되고 다시 시작됩니다."):
+                if messagebox.askyesno("JY_Encoder 업데이트",
+                                       f"v{cur} → v{latest} 로 업데이트할까요?\n받은 뒤 JY_Encoder가 종료되고 다시 시작됩니다."):
                     self._download_update(latest)
         self.after(500, poll)
 
@@ -353,7 +353,7 @@ class App(tk.Tk):
                 self.after(500, poll)
                 return
             if not setup:
-                messagebox.showwarning("인코딩도구 업데이트", "업데이트 파일을 받지 못했습니다.")
+                messagebox.showwarning("JY_Encoder 업데이트", "업데이트 파일을 받지 못했습니다.")
                 return
             jyupdate.launch_setup(setup, "encoder")
             self.destroy()
@@ -361,7 +361,7 @@ class App(tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title("H.265 인코딩 도구")
+        self.title("JY_Encoder")
         self.geometry("1320x680")
         self.items = {}            # iid -> dict(path, info, checked, status)
         self.q = queue.Queue()     # 워커 -> UI 메시지
