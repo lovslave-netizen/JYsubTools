@@ -12,7 +12,7 @@
     },
     {
       "id": "encoder",
-      "name": "인코딩도구",
+      "name": "JYEncoder",
       "out": "JYEncoder-Setup",
       "app_id": "22BF5FD9-38CC-4A36-8126-021FF3B358D3",
       "tools": [
@@ -47,7 +47,7 @@
   "tools": [
     {
       "id": "encoder",
-      "name": "인코딩도구",
+      "name": "JYEncoder",
       "desc": "H.265 인코딩 (ffmpeg 필요)",
       "entry": "tools/encoder/인코딩도구.pyw",
       "exe": "인코딩도구",
