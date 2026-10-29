@@ -1407,7 +1407,7 @@ class MainWindow(QMainWindow):
         if not self._ask(f"v{cur} → v{latest} 로 업데이트할까요?\n받은 뒤 JYPlayer 가 종료되고 다시 시작됩니다."):
             return
         self.flash("업데이트 파일을 받는 중...")
-        setup = self._busy(lambda: jyupdate.download_setup(gh, latest))
+        setup = self._busy(lambda: jyupdate.download_setup(gh, latest, "JYPlayer-Setup-*.exe"))
         if not setup:
             self._warn("업데이트 파일을 받지 못했습니다.")
             return

@@ -15,6 +15,8 @@ import queue
 import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "common"))  # 개발 중 실행용 (설치본은 불필요)
+import jyupdate  # 자체 업데이트 (gh 로 확인/받기)
 
 VIDEO_EXT = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".m2ts",
              ".mts", ".flv", ".webm", ".mpg", ".mpeg", ".vob", ".3gp"}
@@ -310,6 +312,53 @@ def build_merge_cmd(items, dst, enc, q, preset):
 
 
 class App(tk.Tk):
+    # ---- 업데이트: 켤 때 한 번 조용히 확인 → 새 버전이 있으면 물어보고, 받아서 설치 후 다시 시작
+    def _start_update_check(self):
+        cur = jyupdate.installed_version()
+        if not cur:
+            return
+        box = queue.Queue()
+
+        def work():
+            gh = jyupdate.find_gh()
+            box.put(jyupdate.latest_version(gh) if gh and jyupdate.logged_in(gh) else None)
+
+        threading.Thread(target=work, daemon=True).start()
+
+        def poll():
+            try:
+                latest = box.get_nowait()
+            except queue.Empty:
+                self.after(500, poll)
+                return
+            if latest and jyupdate.is_newer(latest, cur):
+                if messagebox.askyesno("인코딩도구 업데이트",
+                                       f"v{cur} → v{latest} 로 업데이트할까요?\n받은 뒤 인코딩도구가 종료되고 다시 시작됩니다."):
+                    self._download_update(latest)
+        self.after(500, poll)
+
+    def _download_update(self, latest):
+        box = queue.Queue()
+
+        def work():
+            gh = jyupdate.find_gh()
+            box.put(jyupdate.download_setup(gh, latest, "JYEncoder-Setup-*.exe") if gh else None)
+
+        threading.Thread(target=work, daemon=True).start()
+
+        def poll():
+            try:
+                setup = box.get_nowait()
+            except queue.Empty:
+                self.after(500, poll)
+                return
+            if not setup:
+                messagebox.showwarning("인코딩도구 업데이트", "업데이트 파일을 받지 못했습니다.")
+                return
+            jyupdate.launch_setup(setup, "encoder")
+            self.destroy()
+        self.after(500, poll)
+
     def __init__(self):
         super().__init__()
         self.title("H.265 인코딩 도구")
@@ -1278,4 +1327,6 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    app = App()
+    app.after(2000, app._start_update_check)
+    app.mainloop()

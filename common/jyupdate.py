@@ -95,11 +95,11 @@ def login_in_console(gh):
     return run_in_console('"%s" auth login --hostname github.com --git-protocol https --web' % gh)
 
 
-def download_setup(gh, version):
-    """setup 을 임시 폴더로 받아 경로를 돌려준다. 실패하면 None."""
+def download_setup(gh, version, pattern):
+    """setup 을 임시 폴더로 받아 경로를 돌려준다. 실패하면 None. pattern: 예) "JYPlayer-Setup-*.exe"""
     dest = tempfile.mkdtemp(prefix="jysub_update_")
     r = _run([gh, "release", "download", "v" + version, "--repo", REPO,
-              "--pattern", "JYsubTools-Setup-*.exe", "--dir", dest, "--clobber"], timeout=900)
+              "--pattern", pattern, "--dir", dest, "--clobber"], timeout=900)
     if not r or r.returncode != 0:
         return None
     for n in os.listdir(dest):
