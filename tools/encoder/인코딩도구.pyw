@@ -14,7 +14,7 @@ import datetime
 import queue
 import re
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "common"))  # 개발 중 실행용 (설치본은 불필요)
 import jyupdate  # 자체 업데이트 (gh 로 확인/받기)
 
@@ -385,6 +385,7 @@ class App(tk.Tk):
         top = ttk.Frame(self, padding=6)
         top.pack(fill="x")
         ttk.Button(top, text="폴더 스캔 (하위 포함)", command=self.add_folder).pack(side="left")
+        ttk.Button(top, text="네트워크 경로", command=self.add_network).pack(side="left", padx=4)
         ttk.Button(top, text="파일 추가", command=self.add_files).pack(side="left", padx=4)
         ttk.Button(top, text="목록 비우기", command=self.clear).pack(side="left")
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=8)
@@ -534,6 +535,21 @@ class App(tk.Tk):
         d = filedialog.askdirectory(title="스캔할 폴더")
         if d:
             self._scan([d], True)
+
+    def add_network(self):
+        r"""네트워크 경로(\서버\공유\폴더)를 직접 적어서 스캔한다. 폴더 선택 창에서는 네트워크 위치를 찾기 어려워서.
+        SendAny 의 '경로 복사' 형식(\IP\공유, 앞에 \ 하나)도 받는다."""
+        text = simpledialog.askstring("네트워크 경로", "폴더 경로를 입력하세요\n예: \\\\100.64.1.2\\영상\\드라마", parent=self)
+        if not text:
+            return
+        path = text.strip().strip('"')
+        if path.startswith("\\") and not path.startswith("\\\\"):
+            path = "\\" + path                          # \IP\공유 → \\IP\공유
+        if not os.path.isdir(path):
+            messagebox.showwarning("네트워크 경로", f"폴더를 찾을 수 없습니다:\n{path}\n\n"
+                                   "경로와 접속 상태(테일넷 연결, 공유 이름)를 확인하세요.", parent=self)
+            return
+        self._scan([os.path.normpath(path)], True)
 
     def add_files(self):
         fs = filedialog.askopenfilenames(
