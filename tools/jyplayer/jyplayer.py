@@ -26,7 +26,8 @@ def app_dir():
 
 # libmpv-2.dll 을 찾을 수 있도록 PATH에 추가한 뒤 mpv import
 # 설치형: 설치폴더\bin (공용) 도 함께 찾는다
-for _d in (resource_dir(), os.path.normpath(os.path.join(app_dir(), "..", "bin"))):
+for _d in (resource_dir(), os.path.normpath(os.path.join(app_dir(), "..", "bin")),
+           os.path.join(os.environ.get("LOCALAPPDATA", ""), "JY", "bin")):     # 공용 bin (JY_Encoder 와 같이 씀)
     if os.path.isdir(_d):
         os.environ["PATH"] = _d + os.pathsep + os.environ.get("PATH", "")
         if hasattr(os, "add_dll_directory"):

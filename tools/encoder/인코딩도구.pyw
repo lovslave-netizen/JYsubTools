@@ -41,7 +41,8 @@ def base_dir():
 def tool(name):
     # 설치형: 설치폴더\bin (공용) -> exe 옆 bin -> (예전 빌드) 번들 bin -> PATH
     exe_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
-    for d in (os.path.join(exe_dir, "..", "bin"), os.path.join(exe_dir, "bin"), os.path.join(base_dir(), "bin")):
+    for d in (os.path.join(exe_dir, "..", "bin"), os.path.join(exe_dir, "bin"), os.path.join(base_dir(), "bin"),
+              os.path.join(os.environ.get("LOCALAPPDATA", ""), "JY", "bin")):    # 공용 (모든 JY 프로그램이 같이 씀)
         p = os.path.normpath(os.path.join(d, name + ".exe"))
         if os.path.exists(p):
             return p

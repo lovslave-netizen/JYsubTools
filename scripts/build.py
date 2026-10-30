@@ -119,7 +119,7 @@ Name: "custom"; Description: "선택 설치"; Flags: iscustom
     for t in tools:
         L.append(f'Name: "{{group}}\\{t["name"]}"; Filename: "{{app}}\\{t["id"]}\\{t["exe"]}.exe"; Components: {t["id"]}')
 
-    # ---- Pascal 코드: 선택된 툴에서 필요한 의존성만 받아서 {app}\bin 에 푼다 ----
+    # ---- Pascal 코드: 선택된 툴에서 필요한 의존성만 받아서 {localappdata}\JY\bin 에 푼다 ----
     def need_expr(dep):
         ids = [t["id"] for t in tools if dep in t["deps"]]
         return " or ".join(f"WizardIsComponentSelected({pas(i)})" for i in ids) or "False"
@@ -130,7 +130,7 @@ Name: "custom"; Description: "선택 설치"; Flags: iscustom
         code.append(f"  if Dep = {pas(d)} then Result := {need_expr(d)};")
     code += ["end;", "",
              "function DepMarker(const Dep, Ver: String): String;", "begin",
-             "  Result := ExpandConstant('{app}\\bin\\.dep_') + Dep + '_' + Ver;", "end;", "",
+             "  Result := ExpandConstant('{localappdata}\\JY\\bin\\.dep_') + Dep + '_' + Ver;", "end;", "",
              "function OnDownloadProgress(const Url, FileName: String; const Progress, ProgressMax: Int64): Boolean;",
              "begin", "  if Progress = ProgressMax then Log('다운로드 완료: ' + FileName);", "  Result := True;", "end;", "",
              "function LaunchIs(const Id: String): Boolean;", "begin",
@@ -168,9 +168,9 @@ Name: "custom"; Description: "선택 설치"; Flags: iscustom
              "    DepFailures := DepFailures + #13#10 + Dep;",
              "    Exit;",
              "  end;",
-             "  ForceDirectories(ExpandConstant('{app}\\bin'));",
+             "  ForceDirectories(ExpandConstant('{localappdata}\\JY\\bin'));",
              "  for I := 0 to GetArrayLength(Picks) - 1 do",
-             "    if not FileCopy(Dest + '\\' + Picks[I], ExpandConstant('{app}\\bin\\') + ExtractFileName(Picks[I]), False) then",
+             "    if not FileCopy(Dest + '\\' + Picks[I], ExpandConstant('{localappdata}\\JY\\bin\\') + ExtractFileName(Picks[I]), False) then",
              "      DepFailures := DepFailures + #13#10 + Dep + ': ' + Picks[I];",
              "  SaveStringToFile(DepMarker(Dep, Ver), Ver, False);",
              "  DelTree(Dest, True, True, True);",
