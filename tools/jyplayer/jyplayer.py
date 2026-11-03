@@ -87,9 +87,18 @@ def async_key_down(vk):
     return bool(user32.GetAsyncKeyState(vk) & 0x8000)
 
 
+GWL_EXSTYLE = -20
+WS_EX_TRANSPARENT = 0x00000020
+
+
 def disable_child_windows(hwnd):
-    """mpv가 만든 자식 창을 비활성화 → 클릭해도 키보드 포커스를 뺏지 않고 마우스는 부모(Qt)로 간다."""
+    """mpv가 만든 자식 창 처리.
+    - 클릭 통과(WS_EX_TRANSPARENT): 자식 창이 클릭을 가로채지 않아서 마우스가 Qt(영상 영역)로 온다 → 화면 드래그/더블클릭/우클릭 동작
+    - 비활성화(EnableWindow False): 클릭해도 키보드 포커스를 뺏지 않는다"""
     def cb(h, _):
+        ex = user32.GetWindowLongW(h, GWL_EXSTYLE)
+        if not ex & WS_EX_TRANSPARENT:
+            user32.SetWindowLongW(h, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT)
         if user32.IsWindowEnabled(h):
             user32.EnableWindow(h, False)
         return True
@@ -164,7 +173,8 @@ class VideoWidget(QWidget):
             self.rightClicked.emit()
         elif ev.button() == Qt.LeftButton:
             self._drag_start = ev.globalPosition().toPoint()
-            self._win_start = self.window().pos()
+            # self.pos 는 재생목록 위치(숫자)라서 QWidget.pos() 를 가린다 -> 창 위치는 frameGeometry 로 읽는다
+            self._win_start = self.window().frameGeometry().topLeft()
         super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev):
@@ -500,11 +510,13 @@ class MainWindow(QMainWindow):
             return b
 
         self.btn_add = mkbtn("추가", self._pick_files_to_add)
+        self.btn_add_folder = mkbtn("폴더 추가", self._pick_folder_to_add)
         self.btn_remove = mkbtn("제거", self.remove_selected_from_playlist)
         self.btn_save_list = mkbtn("목록 저장", self.save_playlist)
         self.btn_load_list = mkbtn("목록 열기", self.load_playlist)
         list_tools = QHBoxLayout()
         list_tools.addWidget(self.btn_add)
+        list_tools.addWidget(self.btn_add_folder)
         list_tools.addWidget(self.btn_remove)
         list_tools.addWidget(self.btn_save_list)
         list_tools.addWidget(self.btn_load_list)
@@ -527,6 +539,9 @@ class MainWindow(QMainWindow):
         self.setStyleSheet("""
             QMainWindow, QSplitter, QWidget#bar { background: #1b1b1b; }
             QLabel, QCheckBox { color: #dddddd; }
+            QMessageBox { background: #f2f2f2; }
+            QMessageBox QLabel { color: #000000; }
+            QMessageBox QPushButton { color: #000000; background: #e4e4e4; border: 1px solid #9a9a9a; padding: 4px 14px; min-width: 64px; }
             QLabel#mode { color: #ffc861; padding: 0 8px; }
             QLabel#msg { color: #8fd0ff; padding: 0 8px; }
             QListWidget { background: #141414; color: #bbbbbb; border: none; }
@@ -775,6 +790,13 @@ class MainWindow(QMainWindow):
         paths, _ = QFileDialog.getOpenFileNames(self, "재생목록에 추가", start_dir, filt)
         if paths:
             self.add_to_playlist(paths)
+
+    def _pick_folder_to_add(self):
+        """폴더를 고르면 그 안의 동영상(하위 폴더 포함)을 전부 재생목록 끝에 추가한다."""
+        start_dir = self.root_folder or self.settings.get("last_folder", "")
+        folder = QFileDialog.getExistingDirectory(self, "폴더 추가 (안의 동영상 전부)", start_dir)
+        if folder:
+            self.add_to_playlist([folder])
 
     def add_to_playlist(self, paths):
         """드래그로 끌어온 파일/폴더 또는 '추가' 버튼으로 고른 파일들을 재생목록 끝에 붙인다."""
