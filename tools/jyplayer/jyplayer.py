@@ -42,7 +42,7 @@ from send2trash import send2trash  # noqa: E402
 from PySide6.QtCore import QByteArray, QEvent, QObject, QPoint, Qt, QTimer, Signal  # noqa: E402
 from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QPalette  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
-    QAbstractItemView, QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QListWidget,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QSlider, QSplitter, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -72,6 +72,11 @@ SEEK_STEPS = {(False, False): 5, (False, True): 10, (True, False): 30, (True, Tr
 VOLUME_STEP = 5
 VOLUME_MAX = 130
 AUDIO_DELAY_STEP = 0.1  # 소리 싱크 조절 단위(초). . 은 소리를 늦춤, , 는 앞당김
+# 하드웨어 디코딩 선택지 (표시 이름, mpv hwdec 값). 자동-안전은 GPU 가 되는 경우만 쓰고 안 되면 CPU
+HWDEC_CHOICES = [("자동 (권장)", "auto-safe"), ("자동 (모든 방식)", "auto"), ("끔 (CPU 디코딩)", "no"),
+                 ("Direct3D 11", "d3d11va"), ("DXVA2", "dxva2")]
+# 미리 읽기(디스크에서 미리 가져다 두는 양, MB). 느린 디스크(내장 HDD 등)에서 재생/구간 이동을 부드럽게
+READAHEAD_CHOICES = [("2GB (기본, 최대)", 2048), ("1GB", 1024), ("500MB", 500), ("150MB", 150)]
 
 user32 = ctypes.windll.user32
 user32.GetKeyState.restype = ctypes.c_short
@@ -383,7 +388,9 @@ class MainWindow(QMainWindow):
         self.player = mpv.MPV(
             wid=str(int(self.video.winId())),
             vo="gpu",
-            hwdec="auto-safe",
+            hwdec=self.settings.get("hwdec", "auto-safe"),
+            cache="yes",
+            demuxer_max_bytes=f"{self.settings.get('readahead_mb', 2048)}MiB",
             keep_open="yes",
             idle="yes",
             input_default_bindings=False,
@@ -477,6 +484,26 @@ class MainWindow(QMainWindow):
         row2.addWidget(self.lbl_mode)
         row2.addWidget(self.lbl_index)
         row2.addWidget(self.chk_random)
+        self.cmb_hwdec = QComboBox()
+        self.cmb_hwdec.setFocusPolicy(Qt.NoFocus)
+        self.cmb_hwdec.setToolTip("하드웨어 디코딩 (느리면 Direct3D 11 이나 끔을 시험)")
+        for label, val in HWDEC_CHOICES:
+            self.cmb_hwdec.addItem(label, val)
+        self.cmb_hwdec.setCurrentIndex(max(0, [v for _, v in HWDEC_CHOICES].index(self.settings.get("hwdec", "auto-safe"))
+                                       if self.settings.get("hwdec", "auto-safe") in [v for _, v in HWDEC_CHOICES] else 0))
+        self.cmb_hwdec.currentIndexChanged.connect(self._on_hwdec_changed)
+        row2.addWidget(QLabel("디코딩"))
+        row2.addWidget(self.cmb_hwdec)
+        self.cmb_cache = QComboBox()
+        self.cmb_cache.setFocusPolicy(Qt.NoFocus)
+        self.cmb_cache.setToolTip("미리 읽기: 디스크에서 미리 가져다 두는 양. 느린 디스크에서 키우면 재생이 부드러워짐")
+        for label, mb in READAHEAD_CHOICES:
+            self.cmb_cache.addItem(label, mb)
+        cur_mb = self.settings.get("readahead_mb", 2048)
+        self.cmb_cache.setCurrentIndex(max(0, next((i for i, (_, mb) in enumerate(READAHEAD_CHOICES) if mb == cur_mb), 0)))
+        self.cmb_cache.currentIndexChanged.connect(self._on_cache_changed)
+        row2.addWidget(QLabel("미리 읽기"))
+        row2.addWidget(self.cmb_cache)
         row2.addWidget(self.btn_open)
         row2.addWidget(self.btn_update)
 
@@ -779,6 +806,24 @@ class MainWindow(QMainWindow):
         self._save_settings()
         self._update_mode_label()
         self.flash("랜덤 재생 ON" if self.random_mode else "랜덤 재생 OFF")
+
+    def _on_cache_changed(self, _index):
+        """미리 읽기 양 변경: 바로 적용하고 설정(readahead_mb)에 저장."""
+        mb = self.cmb_cache.currentData()
+        self.settings["readahead_mb"] = mb
+        if hasattr(self, "player"):
+            self.player["demuxer-max-bytes"] = f"{mb}MiB"
+        self.volume_save_timer.start()
+        self.flash(f"미리 읽기: {self.cmb_cache.currentText()}")
+
+    def _on_hwdec_changed(self, _index):
+        """하드웨어 디코딩 방식 변경: 바로 적용하고 설정에 저장 (다음에 켤 때도 같은 방식)."""
+        val = self.cmb_hwdec.currentData()
+        self.settings["hwdec"] = val
+        if hasattr(self, "player"):
+            self.player.hwdec = val
+        self.volume_save_timer.start()
+        self.flash(f"디코딩: {self.cmb_hwdec.currentText()}")
 
     def _on_random_checkbox(self, _checked):
         self.toggle_random()
@@ -1333,6 +1378,7 @@ class MainWindow(QMainWindow):
             f"영상 코덱: {vcodec}",
             f"음성 코덱: {acodec}",
             f"FPS: {fps:.2f}" if fps else "FPS: 알 수 없음",
+            f"디코딩: {self._mpv_get('hwdec_current') or '알 수 없음'} (설정: {self.cmb_hwdec.currentText()})",
             f"비트레이트: {fmt_br(total_br)} (전체 평균)",
             f"  영상: {fmt_br(vbr)}   음성: {fmt_br(abr)}",
         ]
