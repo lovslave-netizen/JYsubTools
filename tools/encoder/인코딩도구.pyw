@@ -99,6 +99,14 @@ def copy_times(src, dst):
     k32.CloseHandle(h)
 
 
+def fmt_mtime(path):
+    """파일 수정한 날짜/시각 (예: 2026-11-09 23:41). 못 읽으면 빈 문자열."""
+    try:
+        return datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M")
+    except OSError:
+        return ""
+
+
 def fmt_size(n):
     for u in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024 or u == "TB":
@@ -432,9 +440,9 @@ class App(tk.Tk):
         ttk.Combobox(opt, textvariable=self.after_done, values=AFTER, width=10,
                      state="readonly").pack(side="left", padx=6)
 
-        cols = ("sel", "merge", "name", "codec", "bitrate", "res", "size", "outsize", "ratio", "status")
-        heads = ("선택", "합치기", "파일 (폴더)", "코덱", "비트레이트", "해상도", "원본 크기", "결과 크기", "감소율", "상태")
-        widths = (50, 60, 380, 60, 90, 80, 80, 80, 70, 170)
+        cols = ("sel", "merge", "name", "mtime", "codec", "bitrate", "res", "size", "outsize", "ratio", "status")
+        heads = ("선택", "합치기", "파일 (폴더)", "수정한 날짜", "코덱", "비트레이트", "해상도", "원본 크기", "결과 크기", "감소율", "상태")
+        widths = (50, 60, 380, 120, 60, 90, 80, 80, 80, 70, 170)
         self.tree = ttk.Treeview(self, columns=cols, show="headings", selectmode="extended")
         for c, h, w in zip(cols, heads, widths):
             self.tree.heading(c, text=h, command=lambda c=c: self.sort_by(c))
@@ -605,7 +613,7 @@ class App(tk.Tk):
     def _row_values(self, it):
         i = it["info"]
         ov = out_view(it)  # (결과 크기, 비교 기준 원본 크기)
-        return ("☑" if it["checked"] else "☐", str(it["merge"]) if it.get("merge") else "☐", it["label"], i["codec"], fmt_rate(i["bitrate"]),
+        return ("☑" if it["checked"] else "☐", str(it["merge"]) if it.get("merge") else "☐", it["label"], it.get("mtime", ""), i["codec"], fmt_rate(i["bitrate"]),
                 i["res"], fmt_size(i["size"]), fmt_size(ov[0]) if ov else "",
                 f"-{100 - ov[0] / ov[1] * 100:.0f}%" if ov and ov[0] < ov[1]
                 else (f"+{ov[0] / ov[1] * 100 - 100:.0f}%" if ov else ""), it["status"])
@@ -696,7 +704,6 @@ class App(tk.Tk):
 
     def _enqueue(self, iids):
         """인코딩 중 대기열 맨 뒤에 추가 (작업자가 이미 끝나는 중이면 추가하지 않음 - 다시 시작을 눌러야 함)."""
-        iids = [i for i in iids if not is_hevc(self.items[i])]        # 이미 H.265 인 파일은 대기열에 넣지 않음
         if not iids:
             return
         with self.qlock:
@@ -790,7 +797,7 @@ class App(tk.Tk):
             i = it["info"]
             ov = out_view(it)
             return {"sel": it["checked"], "merge": it.get("merge") or 0, "name": it["label"].lower(),
-                    "codec": i["codec"], "bitrate": i["bitrate"], "res": i["res"], "size": i["size"],
+                    "mtime": it.get("mtime_ts", 0), "codec": i["codec"], "bitrate": i["bitrate"], "res": i["res"], "size": i["size"],
                     "outsize": ov[0] if ov else 0, "ratio": ov[0] / ov[1] if ov else 9,
                     "status": it["status"]}[col]
 
@@ -818,15 +825,18 @@ class App(tk.Tk):
         if not todo:
             messagebox.showinfo("인코딩", "선택된 파일이 없습니다.")
             return
-        done = [iid for iid in todo if is_hevc(self.items[iid])]     # 이미 H.265 인 파일은 다시 인코딩하지 않음
+        done = [iid for iid in todo if is_hevc(self.items[iid])]     # 이미 H.265 인 파일: 직접 체크했을 때만 확인
         if done:
-            for i in done:
-                self.items[i]["checked"] = False
-                self.refresh(i)
-            todo = [i for i in todo if i not in done]
-            if not todo:
-                messagebox.showinfo("인코딩", f"체크한 {len(done)}개는 이미 H.265(hevc) 라서 인코딩하지 않습니다.")
-                return
+            names = "\n".join(f"· {self.items[i]['label']}" for i in done[:8])
+            more = f"\n… 외 {len(done) - 8}개" if len(done) > 8 else ""
+            if not messagebox.askyesno("이미 H.265", f"체크한 {len(done)}개는 이미 H.265(hevc) 파일입니다.\n\n{names}{more}\n\n"
+                                       "그래도 다시 인코딩할까요?\n(아니오 = 이 파일들은 빼고 진행)"):
+                for i in done:
+                    self.items[i]["checked"] = False
+                    self.refresh(i)
+                todo = [i for i in todo if i not in done]
+                if not todo:
+                    return
         warn = [iid for iid in todo if self.items[iid].get("bigger")]
         if warn:  # 예전에 인코딩했더니 원본보다 커졌던 파일이 체크돼 있으면 알려 준다
             lines = "\n".join(f"· {self.items[i]['label']}  —  {self._bigger_text(self.items[i]['bigger'])}"
@@ -931,9 +941,6 @@ class App(tk.Tk):
                 name = os.path.basename(its[0]["path"])
             status("합치는 중 0%" if merge else "인코딩 중 0%")
             self.q.put(("msg", f"[{n}/{total}] {name}"))
-            if not merge and is_hevc(its[0]):
-                status("건너뜀 (이미 H.265)")
-                continue
             if os.path.exists(dst):
                 status("건너뜀 (결과 파일 있음)")
                 continue
@@ -1273,7 +1280,11 @@ class App(tk.Tk):
                     _, path, info, root = m
                     label = os.path.relpath(path, root) if root else os.path.basename(path)
                     it = {"path": path, "info": info, "checked": info["codec"] != "hevc",
-                          "status": "", "label": label, "merge": 0}
+                          "status": "", "label": label, "merge": 0, "mtime": fmt_mtime(path)}
+                    try:
+                        it["mtime_ts"] = os.path.getmtime(path)
+                    except OSError:
+                        it["mtime_ts"] = 0
                     dst = self.out_path(path)
                     if os.path.exists(dst):  # 이전에 만든 결과가 있으면 비교 대상으로 연결
                         it["out"] = {"path": dst, "size": os.path.getsize(dst)}
