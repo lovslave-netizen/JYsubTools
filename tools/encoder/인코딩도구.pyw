@@ -249,6 +249,11 @@ def build_cmd(src, dst, enc, q, preset, info):
     return cmd
 
 
+def is_hevc(it):
+    """목록 항목이 이미 H.265(hevc) 이면 True (다시 H.265 로 인코딩하지 않는다)"""
+    return it["info"]["codec"] == "hevc"
+
+
 def tag_args(enc):
     # hvc1 태그는 HEVC 전용 (mp4 호환). AV1 은 태그 없이 기본값을 쓴다.
     return [] if enc.endswith("av1") else ["-tag:v", "hvc1"]
@@ -657,7 +662,7 @@ class App(tk.Tk):
 
     def check_selected(self, v):
         for iid in self.tree.selection():
-            self.items[iid]["checked"] = v
+            self.items[iid]["checked"] = v and not is_hevc(self.items[iid])
             self.refresh(iid)
 
     def mark_merge(self, v):
@@ -691,6 +696,9 @@ class App(tk.Tk):
 
     def _enqueue(self, iids):
         """인코딩 중 대기열 맨 뒤에 추가 (작업자가 이미 끝나는 중이면 추가하지 않음 - 다시 시작을 눌러야 함)."""
+        iids = [i for i in iids if not is_hevc(self.items[i])]        # 이미 H.265 인 파일은 대기열에 넣지 않음
+        if not iids:
+            return
         with self.qlock:
             if not self.worker_alive:
                 return
@@ -761,7 +769,7 @@ class App(tk.Tk):
         if self.encoding:
             return
         for iid, it in self.items.items():
-            it["checked"] = v and not it.get("bigger")
+            it["checked"] = v and not it.get("bigger") and not is_hevc(it)
             self.refresh(iid)
 
     def select_non_hevc(self):
@@ -810,6 +818,15 @@ class App(tk.Tk):
         if not todo:
             messagebox.showinfo("인코딩", "선택된 파일이 없습니다.")
             return
+        done = [iid for iid in todo if is_hevc(self.items[iid])]     # 이미 H.265 인 파일은 다시 인코딩하지 않음
+        if done:
+            for i in done:
+                self.items[i]["checked"] = False
+                self.refresh(i)
+            todo = [i for i in todo if i not in done]
+            if not todo:
+                messagebox.showinfo("인코딩", f"체크한 {len(done)}개는 이미 H.265(hevc) 라서 인코딩하지 않습니다.")
+                return
         warn = [iid for iid in todo if self.items[iid].get("bigger")]
         if warn:  # 예전에 인코딩했더니 원본보다 커졌던 파일이 체크돼 있으면 알려 준다
             lines = "\n".join(f"· {self.items[i]['label']}  —  {self._bigger_text(self.items[i]['bigger'])}"
@@ -914,6 +931,9 @@ class App(tk.Tk):
                 name = os.path.basename(its[0]["path"])
             status("합치는 중 0%" if merge else "인코딩 중 0%")
             self.q.put(("msg", f"[{n}/{total}] {name}"))
+            if not merge and is_hevc(its[0]):
+                status("건너뜀 (이미 H.265)")
+                continue
             if os.path.exists(dst):
                 status("건너뜀 (결과 파일 있음)")
                 continue
