@@ -36,14 +36,21 @@ for _d in (resource_dir(), os.path.normpath(os.path.join(app_dir(), "..", "bin")
 _COMMON = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "common")
 if os.path.isdir(_COMMON):  # 개발 중(스크립트 실행)에는 repo 의 common 폴더를 사용
     sys.path.insert(0, _COMMON)
+import tempfile  # noqa: E402
 import jyupdate  # noqa: E402
 import mpv  # noqa: E402
 from send2trash import send2trash  # noqa: E402
-from PySide6.QtCore import QByteArray, QEvent, QObject, QPoint, Qt, QTimer, Signal  # noqa: E402
-from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QPalette  # noqa: E402
+from PySide6.QtCore import QByteArray, QDir, QEvent, QObject, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal  # noqa: E402
+from PySide6.QtSvg import QSvgRenderer  # noqa: E402
+from PySide6.QtGui import (  # noqa: E402
+    QColor, QCursor, QFont, QFontMetrics, QIcon, QPainter, QPainterPath, QPalette, QPen, QPixmap,
+    QPolygonF,
+)
 from PySide6.QtWidgets import (  # noqa: E402
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QListWidget,
-    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QSlider, QSplitter, QToolButton, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFileSystemModel, QHBoxLayout, QLabel, QListView,
+    QListWidget, QPushButton, QVBoxLayout,
+    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QSizePolicy, QSlider, QSplitter, QStyledItemDelegate, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 VIDEO_EXTS = {
@@ -54,6 +61,7 @@ SETTINGS_PATH = os.path.join(app_dir(), "JYPlayer_settings.json")
 
 # Windows 가상키 코드 - 키보드 배열/한글 입력 상태와 무관하게 동작시키기 위해 사용
 VK_SHIFT, VK_CONTROL, VK_HANJA = 0x10, 0x11, 0x19
+VK_HANGUL = 0x15  # 한국 키보드의 오른쪽 Alt (한/영 키)
 VK_ESCAPE, VK_RETURN, VK_SPACE, VK_PRIOR, VK_NEXT = 0x1B, 0x0D, 0x20, 0x21, 0x22
 VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN, VK_DELETE = 0x25, 0x26, 0x27, 0x28, 0x2E
 VK_F, VK_P, VK_R = 0x46, 0x50, 0x52
@@ -156,6 +164,7 @@ class UpdateBridge(QObject):
 
 class VideoWidget(QWidget):
     doubleClicked = Signal()
+    pressed = Signal()  # 왼쪽 버튼을 누를 때 (전체 화면에서 제목 표시줄을 잠깐 띄우는 데 쓴다)
     rightClicked = Signal()
     wheeled = Signal(int)  # 휠 한 칸 = +1(위) / -1(아래)
 
@@ -177,6 +186,7 @@ class VideoWidget(QWidget):
         if ev.button() == Qt.RightButton:
             self.rightClicked.emit()
         elif ev.button() == Qt.LeftButton:
+            self.pressed.emit()
             self._drag_start = ev.globalPosition().toPoint()
             # self.pos 는 재생목록 위치(숫자)라서 QWidget.pos() 를 가린다 -> 창 위치는 frameGeometry 로 읽는다
             self._win_start = self.window().frameGeometry().topLeft()
@@ -214,6 +224,110 @@ class VideoWidget(QWidget):
         if dy:
             self.wheeled.emit(1 if dy > 0 else -1)
         ev.accept()
+
+
+_ICON_CACHE = {}
+
+
+# Lucide 아이콘 (ISC 라이선스, 24x24 선 아이콘). 색은 실행 때 지정한 색으로 칠한다.
+_LUCIDE = {
+    "play": '<polygon points="5 3 19 12 5 21 5 3"/>',
+    "play_f": '<polygon points="6 4 20 12 6 20 6 4"/>',
+    "pause_f": '<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>',
+    "stop_f": '<rect x="5" y="5" width="14" height="14" rx="2"/>',
+    "pause": '<rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/>',
+    "stop": '<rect width="18" height="18" x="3" y="3" rx="2"/>',
+    "volume": ('<path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/>'
+               '<path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/>'),
+    "check": '<path d="M20 6 9 17l-5-5"/>',
+    "plus": '<path d="M5 12h14"/><path d="M12 5v14"/>',
+    "x": '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+    "square": '<rect width="18" height="18" x="3" y="3" rx="2"/>',
+    "minus": '<path d="M5 12h14"/>',
+    "folder": ('<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/>'),
+    "save": ('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>'),
+    "open": ('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/>'),
+    "refresh": ('<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>'
+                '<path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>'),
+}
+
+
+def draw_icon(kind, color="#2b2622", size=16):
+    """Lucide 아이콘을 지정한 색·크기로 그린다 (유니코드 글자/이모지 대신). kind 가 없으면 빈 칸."""
+    key = (kind, color, size)
+    if key in _ICON_CACHE:
+        return _ICON_CACHE[key]
+    body = _LUCIDE.get(kind, "")
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" '
+           f'fill="{color if kind.endswith('_f') else 'none'}" stroke="{'none' if kind.endswith('_f') else color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{body}</svg>')
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    if body:
+        p = QPainter(pm)
+        QSvgRenderer(QByteArray(svg.encode("utf-8"))).render(p, QRectF(0, 0, size, size))
+        p.end()
+    icon = QIcon(pm)
+    _ICON_CACHE[key] = icon
+    return icon
+
+
+def icon_btn(btn, kind):
+    """버튼에 아이콘을 붙이고 글자는 옆에 그대로 둔다."""
+    btn.setIcon(draw_icon(kind))
+    btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+    btn.setIconSize(QSize(16, 16))
+
+
+def icon_only(btn, kind, tip):
+    """아이콘만 보이게 (글자는 마우스를 올리면 말풍선으로)."""
+    btn.setIcon(draw_icon(kind, size=20))
+    btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+    btn.setIconSize(QSize(20, 20))
+    btn.setFixedSize(30, 30)
+    btn.setStyleSheet("QToolButton { padding: 0px; background: #f3ecdd; border: 1px solid #e2d8c6; border-radius: 8px; }"
+                      "QToolButton:hover { background: #ebe2d0; }")  # 시안과 같은 테두리 칸 (글자 여백은 0)
+    btn.setToolTip(tip)
+
+
+def _extra_qss():
+    """콤보 상자 화살표(구분선이 있는 칸)와 둥근 재생·정지 버튼 모양 - 시안과 같게."""
+    path = os.path.join(tempfile.gettempdir(), "jyplayer_chevron_dark.svg")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+                    'stroke="#2b2622" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>')
+        url = path.replace("\\", "/")
+    except OSError:
+        url = ""
+    return (
+        "QComboBox { min-height: 30px; padding: 0 30px 0 10px; border-radius: 8px; }\n"
+        "QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 26px; border: none; "
+        "background: transparent; outline: none; margin: 0px; padding: 0px; }\n"
+        "QComboBox:focus, QComboBox:on { outline: none; }\n"
+        f"QComboBox::down-arrow {{ image: url({url}); width: 14px; height: 14px; }}\n"
+        "QComboBox:on, QComboBox:focus, QComboBox:hover { background: #f3ecdd; color: #2b2622; border: 1px solid #e2d8c6; "
+        "border-radius: 8px; padding: 0 30px 0 10px; }\n"
+        "QComboBox::drop-down:on { background: transparent; border: none; }\n"
+        "QToolButton#primary { border-radius: 20px; padding: 0px; }\n"
+        "QToolButton#round { border-radius: 20px; padding: 0px; }\n"
+        "QToolButton#outline { background: #f3ecdd; color: #2b2622; border: 1px solid #e2d8c6; border-radius: 8px; font-weight: 600; padding: 6px 14px; }\n"
+        "QWidget#titlebar { background: #f3ecdd; border-bottom: 1px solid #e2d8c6; }\n"
+        "QLabel#wintitle { color: #2b2622; font-size: 12px; padding-left: 2px; }\n"
+        "QToolButton#winbtn, QToolButton#wincls { background: transparent; border: none; border-radius: 0px; padding: 0px; }\n"
+        "QToolButton#winbtn:hover { background: #ebe2d0; }\n"
+        "QToolButton#wincls:hover { background: #c42b1c; }\n"
+        "QSplitter::handle { background: #e2d8c6; }\n"
+        "QWidget#leftpane { background: #f3ecdd; }\n"
+        "QWidget#side { background: #f3ecdd; }\n"
+    )
+
+
+class MiddleElideDelegate(QStyledItemDelegate):
+    """긴 파일명은 가운데를 줄인다 (앞·뒤를 남김): hhd800.com@PRED…restored.mp4"""
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        option.textElideMode = Qt.ElideMiddle
 
 
 class PlaylistWidget(QListWidget):
@@ -317,11 +431,12 @@ class FullscreenBar(QWidget):
         self.setFocusPolicy(Qt.NoFocus)
         self.setObjectName("fsbar")
         self.btn_play = QToolButton()
-        self.btn_play.setText("▶")
+        self.btn_play.setIcon(draw_icon("play_f", "#ffffff"))
         self.btn_play.setFocusPolicy(Qt.NoFocus)
         self.slider = ClickSlider()
         self.lbl_time = QLabel("--:-- / --:--")
-        self.lbl_vol = QLabel("🔊")
+        self.lbl_vol = QLabel()
+        self.lbl_vol.setPixmap(draw_icon("volume").pixmap(16, 16))
         self.vol_slider = VolumeSlider()
         lay = QHBoxLayout(self)
         lay.setContentsMargins(14, 6, 14, 6)
@@ -331,13 +446,16 @@ class FullscreenBar(QWidget):
         lay.addWidget(self.lbl_vol)
         lay.addWidget(self.vol_slider)
         self.setStyleSheet("""
-            QWidget#fsbar { background: #1b1b1b; }
-            QLabel { color: #dddddd; }
-            QToolButton { color: #dddddd; background: #2a2a2a; border: 1px solid #3a3a3a; padding: 2px 8px; }
-            QSlider::groove:horizontal { height: 6px; background: #3a3a3a; }
-            QSlider::sub-page:horizontal { background: #4a90d9; }
-            QSlider::handle:horizontal { width: 12px; margin: -4px 0; background: #dddddd; border-radius: 6px; }
+            QWidget#fsbar { background: #f3ecdd; border-top: 1px solid #e2d8c6; }
+            QLabel { color: #2b2622; }
+            QToolButton { color: #2b2622; background: #f3ecdd; border: 1px solid #e2d8c6; border-radius: 4px; padding: 6px 12px; }
+            QToolButton:hover { background: #ebe2d0; }
+            QToolButton#primary { background: #2f3237; border-color: #2f3237; color: #ffffff; }
+            QSlider::groove:horizontal { height: 4px; background: #e2d8c6; border-radius: 2px; }
+            QSlider::sub-page:horizontal { background: #2f3237; border-radius: 2px; }
+            QSlider::handle:horizontal { width: 12px; margin: -5px 0; background: #2b2622; border-radius: 6px; }
         """)
+        self.btn_play.setObjectName("primary")
         self.setWindowOpacity(0.9)
 
     def place_on(self, screen_geo):
@@ -345,9 +463,154 @@ class FullscreenBar(QWidget):
                          screen_geo.width(), self.HEIGHT)
 
 
+class SwitchCheck(QCheckBox):
+    """랜덤 스위치: 시안처럼 둥근 토글 + 글자 (체크박스와 같은 신호·값을 쓴다)."""
+
+    def sizeHint(self):
+        return QSize(44 + self.fontMetrics().horizontalAdvance(self.text()) + 6, 22)
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        on = self.isChecked()
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#2f3237" if on else "#e2d8c6"))
+        p.drawRoundedRect(QRectF(0, 3, 36, 18), 9, 9)
+        p.setBrush(QColor("#ffffff") if on else QColor("#7a6f63"))
+        p.drawEllipse(QRectF(20 if on else 2, 5, 14, 14))
+        p.setPen(QColor("#2b2622" if on else "#7a6f63"))
+        p.setFont(self.font())
+        p.drawText(QRectF(44, 0, self.width() - 44, self.height()), Qt.AlignVCenter | Qt.AlignLeft, self.text())
+        p.end()
+
+
+class TitleBar(QWidget):
+    """창 틀을 뺀 뒤 우리가 그리는 제목 표시줄: 파일명 · 최소화 · 최대화 · 닫기.
+    끌면 창이 움직이고, 더블클릭하면 최대화/원래 크기."""
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+        self.setObjectName("titlebar")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setFixedHeight(34)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 0, 0, 0)
+        lay.setSpacing(0)
+        self.lbl = QLabel(win.windowTitle())
+        self.lbl.setObjectName("wintitle")
+        win.windowTitleChanged.connect(self.lbl.setText)
+        lay.addWidget(self.lbl, 1)
+        self.btn_min = self._wbtn("minus", "최소화", "winbtn")
+        self.btn_max = self._wbtn("square", "최대화", "winbtn")
+        self.btn_close = self._wbtn("x", "닫기", "wincls")
+        self.btn_min.clicked.connect(win.showMinimized)
+        self.btn_max.clicked.connect(self._toggle_max)
+        self.btn_close.clicked.connect(win.close)
+        for b in (self.btn_min, self.btn_max, self.btn_close):
+            lay.addWidget(b)
+
+    def _wbtn(self, kind, tip, name):
+        b = QToolButton()
+        b.setObjectName(name)
+        b.setIcon(draw_icon(kind, size=14))
+        b.setIconSize(QSize(14, 14))
+        b.setFixedSize(46, 34)
+        b.setToolTip(tip)
+        b.setFocusPolicy(Qt.NoFocus)
+        return b
+
+    def _toggle_max(self):
+        if self.win.isMaximized():
+            self.win.showNormal()
+        else:
+            self.win.showMaximized()
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton and self.win.windowHandle() is not None:
+            self.win.windowHandle().startSystemMove()
+
+    def mouseDoubleClickEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self._toggle_max()
+
+
+class AddDialog(QDialog):
+    """+ 추가 창. 파일을 고르면 그 파일들을, 아무것도 고르지 않으면 지금 보고 있는 폴더 전체를 넣는다."""
+
+    def __init__(self, parent, start_dir):
+        super().__init__(parent)
+        self.setWindowTitle("재생목록에 추가")
+        self.resize(680, 480)
+        self.setStyleSheet((parent.styleSheet() if parent is not None else "") +
+                           "QDialog { background: #f3ecdd; } "
+                           "QListView { background: #f3ecdd; color: #2b2622; border: 1px solid #e2d8c6; border-radius: 6px; } "
+                           "QPushButton { color: #2b2622; background: #f3ecdd; border: 1px solid #e2d8c6; border-radius: 6px; padding: 6px 14px; } "
+                           "QPushButton:default { background: #2f3237; color: #ffffff; border-color: #2f3237; font-weight: 600; } ")
+        self.model = QFileSystemModel(self)
+        self.model.setFilter(QDir.AllDirs | QDir.Files | QDir.NoDotAndDotDot)
+        self.model.setNameFilters(["*" + e for e in sorted(VIDEO_EXTS)])
+        self.model.setNameFilterDisables(False)  # 동영상이 아닌 파일은 숨긴다 (폴더는 그대로 보임)
+        self.view = QListView()
+        self.view.setModel(self.model)
+        self.view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.view.doubleClicked.connect(self._on_double_click)
+        self.view.selectionModel().selectionChanged.connect(self._update_ok)
+        self.lbl_path = QLabel()
+        self.lbl_path.setObjectName("title")
+        btn_up = QPushButton("상위 폴더")
+        btn_up.clicked.connect(self._go_up)
+        self.btn_ok = QPushButton()
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self.accept)
+        btn_cancel = QPushButton("취소")
+        btn_cancel.clicked.connect(self.reject)
+        top = QHBoxLayout()
+        top.addWidget(btn_up)
+        top.addWidget(self.lbl_path, 1)
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        bottom.addWidget(btn_cancel)
+        bottom.addWidget(self.btn_ok)
+        lay = QVBoxLayout(self)
+        lay.addLayout(top)
+        lay.addWidget(self.view, 1)
+        lay.addLayout(bottom)
+        self.current = ""
+        self._go(start_dir)
+
+    def _go(self, path):
+        self.current = os.path.abspath(path)
+        idx = self.model.setRootPath(self.current)
+        self.view.setRootIndex(idx)
+        self.lbl_path.setText(self.current)
+        self._update_ok()
+
+    def _on_double_click(self, idx):
+        path = self.model.filePath(idx)
+        if os.path.isdir(path):
+            self._go(path)
+
+    def _go_up(self):
+        parent = os.path.dirname(self.current)
+        if parent and parent != self.current:
+            self._go(parent)
+
+    def _update_ok(self, *_):
+        n = len(self.view.selectedIndexes())
+        self.btn_ok.setText(f"선택한 {n}개 추가" if n else "이 폴더 추가")
+
+    def chosen_paths(self):
+        paths = [self.model.filePath(i) for i in self.view.selectedIndexes()]
+        return paths or [self.current]
+
+
 class MainWindow(QMainWindow):
+    _EDGE = 6  # 창 가장자리에서 이만큼 안쪽이면 크기 조절
+
     def __init__(self):
         super().__init__()
+        self.setWindowFlags(Qt.FramelessWindowHint)  # 창 틀을 빼고 아래에서 제목 표시줄을 직접 그린다
         self.setWindowTitle("JY_Player")
         self.resize(1280, 800)
         self.setAcceptDrops(True)
@@ -367,6 +630,7 @@ class MainWindow(QMainWindow):
         self.consecutive_errors = 0
         self.hanja_held = False           # 한국어 키보드에서 오른쪽 Ctrl이 한자키로 잡히는 경우 대비
         self.hanja_release_seen = False
+        self.hangul_held = False          # 한국 키보드의 오른쪽 Alt(한/영 키) 누르고 있는지
         self._msg_token = 0
         self._was_maximized = False
         self._last_cursor_pos = None
@@ -432,44 +696,57 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         self.video = VideoWidget()
         self.video.doubleClicked.connect(self.toggle_fullscreen)
+        self.video.pressed.connect(self._fs_reveal_chrome)
         self.video.rightClicked.connect(self._show_file_info)
         self.video.wheeled.connect(lambda d: self.change_volume(d * VOLUME_STEP))
 
         self.btn_play = QToolButton()
-        self.btn_play.setText("▶")
+        self.btn_play.setObjectName("primary")
+        self.btn_play.setIcon(draw_icon("play_f", "#ffffff"))
+        self.btn_play.setFixedSize(40, 40)
+        self.btn_play.setIconSize(QSize(20, 20))
         self.btn_play.setFocusPolicy(Qt.NoFocus)
         self.btn_play.setToolTip("재생/일시정지")
         self.btn_play.clicked.connect(self.toggle_pause)
         self.btn_stop = QToolButton()
-        self.btn_stop.setText("■")
+        self.btn_stop.setIcon(draw_icon("stop_f", "#2b2622"))
+        self.btn_stop.setObjectName("round")
+        self.btn_stop.setFixedSize(40, 40)
+        self.btn_stop.setIconSize(QSize(16, 16))
         self.btn_stop.setFocusPolicy(Qt.NoFocus)
         self.btn_stop.setToolTip("정지")
         self.btn_stop.clicked.connect(self.stop_playback)
         self.slider = ClickSlider()
         self.slider.seekRequested.connect(self._seek_fraction)
         self.lbl_time = QLabel("--:-- / --:--")
-        self.lbl_vol = QLabel("🔊")
+        self.lbl_time.setObjectName("time")
+        self.lbl_vol = QLabel()
+        self.lbl_vol.setPixmap(draw_icon("volume").pixmap(16, 16))
         self.vol_slider = VolumeSlider()
         self.vol_slider.volumeRequested.connect(self.set_volume)
 
         self.lbl_name = QLabel("폴더를 열거나 이 창에 끌어다 놓으세요")
-        self.lbl_name.setMinimumWidth(50)
+        self.lbl_name.setObjectName("title")
+        self.lbl_name.setMinimumWidth(0)
+        self.lbl_name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)  # 줄어들 수 있게 (창이 좁을 때 잘림)
         self.lbl_mode = QLabel("")
         self.lbl_mode.setObjectName("mode")
         self.lbl_msg = QLabel("")
         self.lbl_msg.setObjectName("msg")
         self.lbl_index = QLabel("0 / 0")
-        self.chk_random = QCheckBox("랜덤")
+        self.chk_random = SwitchCheck("랜덤")
         self.chk_random.setFocusPolicy(Qt.NoFocus)
         self.chk_random.toggled.connect(self._on_random_checkbox)
         self.btn_open = QToolButton()
         self.btn_open.setText("폴더 열기")
         self.btn_open.setFocusPolicy(Qt.NoFocus)
         self.btn_open.clicked.connect(self.choose_folder)
+        icon_only(self.btn_open, "folder", "폴더 열기")
         self.btn_update = QToolButton()
         self.btn_update.setText("업데이트 확인")
         self.btn_update.setFocusPolicy(Qt.NoFocus)
         self.btn_update.clicked.connect(self.on_update_clicked)
+        self.btn_update.setObjectName("outline")  # 시안: 테두리만 있는 강조 버튼
 
         row1 = QHBoxLayout()
         row1.addWidget(self.btn_play)
@@ -479,10 +756,9 @@ class MainWindow(QMainWindow):
         row1.addWidget(self.lbl_vol)
         row1.addWidget(self.vol_slider)
         row2 = QHBoxLayout()
-        row2.addWidget(self.lbl_name, 1)
-        row2.addWidget(self.lbl_msg)
-        row2.addWidget(self.lbl_mode)
         row2.addWidget(self.lbl_index)
+        row2.addWidget(self.lbl_mode)
+        row2.addStretch(1)
         row2.addWidget(self.chk_random)
         self.cmb_hwdec = QComboBox()
         self.cmb_hwdec.setFocusPolicy(Qt.NoFocus)
@@ -492,7 +768,9 @@ class MainWindow(QMainWindow):
         self.cmb_hwdec.setCurrentIndex(max(0, [v for _, v in HWDEC_CHOICES].index(self.settings.get("hwdec", "auto-safe"))
                                        if self.settings.get("hwdec", "auto-safe") in [v for _, v in HWDEC_CHOICES] else 0))
         self.cmb_hwdec.currentIndexChanged.connect(self._on_hwdec_changed)
-        row2.addWidget(QLabel("디코딩"))
+        cap_hw = QLabel("디코딩")
+        cap_hw.setObjectName("caption")
+        row2.addWidget(cap_hw)
         row2.addWidget(self.cmb_hwdec)
         self.cmb_cache = QComboBox()
         self.cmb_cache.setFocusPolicy(Qt.NoFocus)
@@ -502,20 +780,24 @@ class MainWindow(QMainWindow):
         cur_mb = self.settings.get("readahead_mb", 2048)
         self.cmb_cache.setCurrentIndex(max(0, next((i for i, (_, mb) in enumerate(READAHEAD_CHOICES) if mb == cur_mb), 0)))
         self.cmb_cache.currentIndexChanged.connect(self._on_cache_changed)
-        row2.addWidget(QLabel("미리 읽기"))
+        cap_cache = QLabel("미리 읽기")
+        cap_cache.setObjectName("caption")
+        row2.addWidget(cap_cache)
         row2.addWidget(self.cmb_cache)
-        row2.addWidget(self.btn_open)
         row2.addWidget(self.btn_update)
 
         self.bar = QWidget()
         self.bar.setObjectName("bar")
+        self.bar.setAttribute(Qt.WA_StyledBackground, True)
         bar_layout = QVBoxLayout(self.bar)
-        bar_layout.setContentsMargins(10, 6, 10, 6)
-        bar_layout.setSpacing(4)
+        bar_layout.setContentsMargins(14, 10, 14, 10)
+        bar_layout.setSpacing(8)
         bar_layout.addLayout(row1)
         bar_layout.addLayout(row2)
 
         left = QWidget()
+        left.setObjectName("leftpane")
+        left.setAttribute(Qt.WA_StyledBackground, True)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(0)
@@ -527,63 +809,111 @@ class MainWindow(QMainWindow):
         self.listw.itemDoubleClicked.connect(self._on_list_double_click)
         self.listw.filesDropped.connect(self.add_to_playlist)
         self.listw.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.listw.customContextMenuRequested.connect(self._show_list_menu)
+        # 긴 파일명: 가로 스크롤 없이 가운데를 줄인다
+        self.listw.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.listw.setItemDelegate(MiddleElideDelegate(self.listw))
 
-        def mkbtn(text, slot):
+        def mkbtn(text, slot, icon_kind):
             b = QToolButton()
             b.setText(text)
             b.setFocusPolicy(Qt.NoFocus)
             b.clicked.connect(slot)
+            icon_only(b, icon_kind, text)
             return b
 
-        self.btn_add = mkbtn("추가", self._pick_files_to_add)
-        self.btn_add_folder = mkbtn("폴더 추가", self._pick_folder_to_add)
-        self.btn_remove = mkbtn("제거", self.remove_selected_from_playlist)
-        self.btn_save_list = mkbtn("목록 저장", self.save_playlist)
-        self.btn_load_list = mkbtn("목록 열기", self.load_playlist)
+        # 추가 버튼 하나 - 누르면 파일 또는 폴더를 고르는 메뉴가 뜬다
+        self.btn_add = QToolButton()
+        self.btn_add.setText("추가")
+        self.btn_add.setFocusPolicy(Qt.NoFocus)
+        self.btn_add.clicked.connect(self._open_add_dialog)
+        icon_only(self.btn_add, "plus", "추가 (파일 또는 폴더)")
+        self.btn_remove = mkbtn("제거", self.remove_selected_from_playlist, "minus")
+        self.btn_save_list = mkbtn("목록 저장", self.save_playlist, "save")
+        self.btn_load_list = mkbtn("목록 열기", self.load_playlist, "open")
+        self.lbl_list_count = QLabel("재생목록 · 0개")
+        self.lbl_list_count.setObjectName("listhead")
+
+        # 한 줄: 재생목록 개수 + 아이콘 버튼 (추가, 폴더 열기, 제거, 목록 저장, 목록 열기)
         list_tools = QHBoxLayout()
+        list_tools.setSpacing(4)
+        list_tools.addWidget(self.lbl_list_count)
+        list_tools.addStretch(1)
         list_tools.addWidget(self.btn_add)
-        list_tools.addWidget(self.btn_add_folder)
+        list_tools.addWidget(self.btn_open)
         list_tools.addWidget(self.btn_remove)
         list_tools.addWidget(self.btn_save_list)
         list_tools.addWidget(self.btn_load_list)
 
         self.right_panel = QWidget()
+        self.right_panel.setObjectName("side")
+        self.right_panel.setAttribute(Qt.WA_StyledBackground, True)
         right_layout = QVBoxLayout(self.right_panel)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(4)
+        right_layout.setContentsMargins(10, 10, 10, 10)
+        right_layout.setSpacing(8)
         right_layout.addLayout(list_tools)
         right_layout.addWidget(self.listw, 1)
 
         self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.setHandleWidth(0)  # 가운데 세로 경계선 없앰
         self.splitter.addWidget(left)
         self.splitter.addWidget(self.right_panel)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 0)
-        self.splitter.setSizes([1000, 260])
-        self.setCentralWidget(self.splitter)
+        self.splitter.setSizes([980, 300])
+        self.titlebar = TitleBar(self)
+        body = QWidget()
+        body_lay = QVBoxLayout(body)
+        body_lay.setContentsMargins(0, 0, 0, 0)
+        body_lay.setSpacing(0)
+        body_lay.addWidget(self.titlebar)
+        body_lay.addWidget(self.splitter, 1)
+        self.setCentralWidget(body)
 
         self.setStyleSheet("""
-            QMainWindow, QSplitter, QWidget#bar { background: #1b1b1b; }
-            QLabel, QCheckBox { color: #dddddd; }
+            /* 색 토큰 (시안 기준): 배경 #f3ecdd · 패널 #f3ecdd · 면 #f3ecdd · 선 #e2d8c6 · 글자 #2b2622 · 흐린 글자 #7a6f63 · 강조 #2f3237 */
+            QMainWindow, QSplitter { background: #f3ecdd; }
+            QWidget#bar { background: #f3ecdd; border-top: 1px solid #e2d8c6; }
+            QWidget#titlestrip { background: #f3ecdd; }
+            QLabel#title { color: #2b2622; font-size: 13px; font-weight: 600; }
+            QLabel, QCheckBox { color: #2b2622; background: transparent; }
+            QLabel#time { color: #7a6f63; }
+            QLabel#listhead { color: #7a6f63; font-size: 12px; padding: 0 2px; }
+            QLabel#caption { color: #7a6f63; }
+            QLabel#hint { color: #7a6f63; font-size: 11px; padding: 10px 12px; border-top: 1px solid #e2d8c6; }
+            QLabel#mode { color: #8a5a00; padding: 0 8px; }
+            QLabel#msg { color: #2f3237; padding: 0 8px; }
+            QToolTip { background: #f3ecdd; color: #2b2622; border: 1px solid #e2d8c6; padding: 4px; }
             QMessageBox { background: #f2f2f2; }
             QMessageBox QLabel { color: #000000; }
             QMessageBox QPushButton { color: #000000; background: #e4e4e4; border: 1px solid #9a9a9a; padding: 4px 14px; min-width: 64px; }
-            QLabel#mode { color: #ffc861; padding: 0 8px; }
-            QLabel#msg { color: #8fd0ff; padding: 0 8px; }
-            QListWidget { background: #141414; color: #bbbbbb; border: none; }
-            QListWidget::item:selected { background: #2f4f6f; color: white; }
-            QListWidget::item { padding: 2px 0; }
-            QScrollBar:vertical { background: #1b1b1b; width: 14px; margin: 0; }
-            QScrollBar::handle:vertical { background: #555555; min-height: 24px; border-radius: 6px; }
-            QScrollBar::handle:vertical:hover { background: #6f6f6f; }
+            QListWidget { background: #f3ecdd; color: #7a6f63; border: none; outline: 0; }
+            QListWidget::item { padding: 7px 10px; }
+            QListWidget::item:hover { background: #f3ecdd; }
+            QListWidget::item:selected { background: #e2d8c6; color: #2b2622; }
+            QScrollBar:vertical { background: #f3ecdd; width: 12px; margin: 0; }
+            QScrollBar::handle:vertical { background: #cfc4b0; min-height: 24px; border-radius: 6px; }
+            QScrollBar::handle:vertical:hover { background: #a89d8c; }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
-            QToolButton { color: #dddddd; background: #2a2a2a; border: 1px solid #3a3a3a; padding: 2px 8px; }
-            QSlider::groove:horizontal { height: 6px; background: #3a3a3a; }
-            QSlider::sub-page:horizontal { background: #4a90d9; }
-            QSlider::handle:horizontal { width: 12px; margin: -4px 0; background: #dddddd; border-radius: 6px; }
+            QToolButton { color: #2b2622; background: #f3ecdd; border: 1px solid #e2d8c6; border-radius: 4px; padding: 6px 12px; }
+            QToolButton:hover { background: #ebe2d0; }
+            QToolButton:pressed { background: #f3ecdd; }
+            QToolButton#primary { background: #2f3237; border-color: #2f3237; color: #ffffff; }
+            QToolButton#primary:hover { background: #454a52; }
+            QComboBox { background: #f3ecdd; color: #2b2622; border: 1px solid #e2d8c6; border-radius: 4px; padding: 3px 8px; min-height: 18px; }
+            QComboBox:hover { border-color: #a89d8c; }
+            QComboBox QAbstractItemView { background: #f3ecdd; color: #2b2622; border: 1px solid #e2d8c6; selection-background-color: #2f3237; }
+            QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #a89d8c; border-radius: 3px; background: #f3ecdd; }
+            QCheckBox::indicator:checked { background: #2f3237; border-color: #2f3237; }
+            QMenu { background: #f3ecdd; color: #2b2622; border: 1px solid #e2d8c6; padding: 4px; }
+            QMenu::item { padding: 6px 18px; }
+            QMenu::item:selected { background: #2f3237; color: #ffffff; }
+            QSlider::groove:horizontal { height: 4px; background: #e2d8c6; border-radius: 2px; }
+            QSlider::sub-page:horizontal { background: #2f3237; border-radius: 2px; }
+            QSlider::handle:horizontal { width: 12px; margin: -5px 0; background: #2b2622; border-radius: 6px; }
         """)
+
+        self.setStyleSheet(self.styleSheet() + _extra_qss())
 
     # ---------------------------------------------------------------- 설정
     def _load_settings(self):
@@ -699,10 +1029,15 @@ class MainWindow(QMainWindow):
             self.listw.addItem(self._make_item(p))
 
     def _item_text(self, path):
-        return ("✔ " if path in self.watched else "") + self._display_name(path)
+        return self._display_name(path)
+
+    def _watch_icon(self, path):
+        """'본 파일' 표시 - 글자(✔) 대신 그린 체크 아이콘. 안 본 파일도 같은 칸을 비워 두어 글자 위치를 맞춘다."""
+        return draw_icon("check", "#7a6f63") if path in self.watched else draw_icon("none")
 
     def _make_item(self, path):
         item = QListWidgetItem(self._item_text(path))
+        item.setIcon(self._watch_icon(path))
         item.setData(Qt.UserRole, path)
         item.setToolTip(path)
         return item
@@ -717,7 +1052,9 @@ class MainWindow(QMainWindow):
                 else:
                     self.watched.discard(p)
                 if p in self.files:
-                    self.listw.item(self.files.index(p)).setText(self._item_text(p))
+                    it = self.listw.item(self.files.index(p))
+                    it.setText(self._item_text(p))
+                    it.setIcon(self._watch_icon(p))
         if changed:
             self.settings["watched"] = sorted(self.watched)
             self._save_settings()
@@ -752,7 +1089,7 @@ class MainWindow(QMainWindow):
             font = item.font()
             font.setBold(True)
             item.setFont(font)
-            item.setForeground(QColor("#8fd0ff"))
+            item.setForeground(QColor("#2f3237"))
 
     def _on_list_double_click(self, item):
         path = item.data(Qt.UserRole)
@@ -829,19 +1166,14 @@ class MainWindow(QMainWindow):
         self.toggle_random()
 
     # ---------------------------------------------------------------- 재생목록 편집
-    def _pick_files_to_add(self):
-        filt = "동영상 파일 (" + " ".join("*" + e for e in sorted(VIDEO_EXTS)) + ")"
+    def _open_add_dialog(self):
+        """+ 버튼: 우리 창에서 파일을 고르면 파일을, 아무것도 안 고르면 지금 보는 폴더를 재생목록에 넣는다."""
         start_dir = self.root_folder or self.settings.get("last_folder", "")
-        paths, _ = QFileDialog.getOpenFileNames(self, "재생목록에 추가", start_dir, filt)
-        if paths:
-            self.add_to_playlist(paths)
-
-    def _pick_folder_to_add(self):
-        """폴더를 고르면 그 안의 동영상(하위 폴더 포함)을 전부 재생목록 끝에 추가한다."""
-        start_dir = self.root_folder or self.settings.get("last_folder", "")
-        folder = QFileDialog.getExistingDirectory(self, "폴더 추가 (안의 동영상 전부)", start_dir)
-        if folder:
-            self.add_to_playlist([folder])
+        if not os.path.isdir(start_dir):
+            start_dir = os.path.expanduser("~")
+        dlg = AddDialog(self, start_dir)
+        if dlg.exec() == QDialog.Accepted:
+            self.add_to_playlist(dlg.chosen_paths())
 
     def add_to_playlist(self, paths):
         """드래그로 끌어온 파일/폴더 또는 '추가' 버튼으로 고른 파일들을 재생목록 끝에 붙인다."""
@@ -970,11 +1302,22 @@ class MainWindow(QMainWindow):
         self.flash(f"재생목록 열림: {os.path.basename(path)} ({len(files)}개)")
 
     # ---------------------------------------------------------------- 삭제
+    def _is_playing(self):
+        """재생 중(일시정지 포함)이면 True, 정지 상태(아무것도 안 올라간 상태)면 False."""
+        return bool(self.current) and bool(self._mpv_get("path"))
+
     def delete_selected_or_current(self, permanent):
-        """재생목록에서 드래그/Ctrl 로 선택한 항목이 있으면 그것들을, 없으면 지금 재생 중인 영상을 지운다."""
-        paths = self._selected_paths()
-        if not paths and self.current:
+        """Del 키 우선순위: ①다중 선택 ②지금 재생 중인 영상 ③정지 중이면 클릭(단일 선택)한 항목."""
+        selected = self._selected_paths()
+        if len(selected) >= 2:
+            paths = selected
+        elif self._is_playing():
             paths = [self.current]
+        else:
+            paths = selected[:1]
+        if not paths:
+            self.flash("지울 항목을 먼저 선택하세요")
+            return
         self.delete_paths(paths, permanent)
 
     def delete_current(self, permanent):
@@ -1051,6 +1394,12 @@ class MainWindow(QMainWindow):
             self.del_timer.stop()
 
     # ---------------------------------------------------------------- 재생 조작
+    def _codec_label(self):
+        """지금 영상의 코덱 이름 (HEVC, H264 …). 아직 모르면 빈 문자열."""
+        fmt = (self._mpv_get("video-format") or "").lower()
+        names = {"h264": "H264", "hevc": "HEVC", "vp9": "VP9", "av1": "AV1", "mpeg4": "MPEG-4", "mpeg2video": "MPEG-2"}
+        return names.get(fmt, fmt.upper())
+
     def seek_relative(self, seconds):
         if not self.current:
             return
@@ -1062,7 +1411,7 @@ class MainWindow(QMainWindow):
             if d:
                 target = min(target, d)
             sign = "+" if seconds > 0 else "-"
-            amount = f"{abs(seconds) // 60}분" if abs(seconds) >= 60 else f"{abs(seconds)}초"
+            amount = f"{abs(seconds)}초"  # 60초도 1분이 아니라 60초로 표시
             pct = f"  {max(0, target) / d * 100:.0f}%" if d else ""
             # 파일명은 % 옆에 한 줄로 붙이고, 화면 폭에 안 들어가면 가운데를 ...으로 줄인다
             # (OSD 글자 크기는 화면 높이의 OSD_FONT_SIZE/720)
@@ -1075,7 +1424,8 @@ class MainWindow(QMainWindow):
             # 실제 글자 폭을 재서, 화면 폭에 들어올 때까지만 가운데를 줄인다
             while len(name) > 10 and fm.horizontalAdvance(name) > room:
                 name = elide_middle(name, len(name) - 1)
-            self.player.show_text(head + name, "1000")
+            codec = self._codec_label()
+            self.player.show_text(head + name + (f"  [{codec}]" if codec else ""), "1000")
 
     def _seek_fraction(self, frac, exact):
         if self.current:
@@ -1191,6 +1541,19 @@ class MainWindow(QMainWindow):
         else:
             self.player.show_text("회전 0°", "1000")
 
+    def _fs_reveal_chrome(self):
+        """전체 화면에서 화면을 누르면 제목 표시줄을 3초 띄웠다가 다시 숨긴다."""
+        if not self.isFullScreen():
+            return
+        self.titlebar.show()
+        self._fs_token = getattr(self, "_fs_token", 0) + 1
+        token = self._fs_token
+        QTimer.singleShot(3000, lambda: token == self._fs_token and self._fs_hide_chrome())
+
+    def _fs_hide_chrome(self):
+        if self.isFullScreen():
+            self.titlebar.hide()
+
     def toggle_fullscreen(self):
         if self.isFullScreen():
             self.exit_fullscreen()
@@ -1198,6 +1561,7 @@ class MainWindow(QMainWindow):
             self._was_maximized = self.isMaximized()
             self.bar.hide()
             self.right_panel.hide()
+            self.titlebar.hide()  # 전체 화면에서는 제목 표시줄(최소화·최대화·닫기)도 숨긴다
             self.showFullScreen()
 
     def exit_fullscreen(self):
@@ -1206,6 +1570,7 @@ class MainWindow(QMainWindow):
         self.fs_bar.hide()
         self.bar.show()
         self.right_panel.show()
+        self.titlebar.show()
         self.video.unsetCursor()
         if self._was_maximized:
             self.showMaximized()
@@ -1213,15 +1578,58 @@ class MainWindow(QMainWindow):
             self.showNormal()
 
     # ---------------------------------------------------------------- 키 입력
+    def _edges_at(self, gp):
+        """마우스(전역 좌표)가 창 가장자리에 있으면 그 가장자리 값, 아니면 None."""
+        if self.isMaximized() or self.isFullScreen() or not self.frameGeometry().contains(gp):
+            return None
+        p = self.mapFromGlobal(gp)
+        r = self.rect()
+        m = self._EDGE
+        edges = []
+        if p.x() < m:
+            edges.append(Qt.LeftEdge)
+        elif p.x() > r.width() - m:
+            edges.append(Qt.RightEdge)
+        if p.y() < m:
+            edges.append(Qt.TopEdge)
+        elif p.y() > r.height() - m:
+            edges.append(Qt.BottomEdge)
+        if not edges:
+            return None
+        result = edges[0]
+        for e in edges[1:]:
+            result = result | e
+        return result
+
     def eventFilter(self, obj, ev):
         et = ev.type()
+        if et in (QEvent.MouseMove, QEvent.MouseButtonPress) and self.windowHandle() is not None:
+            edges = self._edges_at(QCursor.pos())
+            if et == QEvent.MouseButtonPress and edges is not None and ev.button() == Qt.LeftButton:
+                self.windowHandle().startSystemResize(edges)
+                return True
+            if et == QEvent.MouseMove:
+                if edges is None:
+                    self.unsetCursor()
+                else:
+                    horiz = bool(edges & (Qt.LeftEdge | Qt.RightEdge))
+                    vert = bool(edges & (Qt.TopEdge | Qt.BottomEdge))
+                    if horiz and vert:
+                        self.setCursor(Qt.SizeFDiagCursor)
+                    elif horiz:
+                        self.setCursor(Qt.SizeHorCursor)
+                    else:
+                        self.setCursor(Qt.SizeVerCursor)
         if et == QEvent.KeyRelease:
             if ev.nativeVirtualKey() == VK_HANJA and not ev.isAutoRepeat():
                 self.hanja_held = False
                 self.hanja_release_seen = True
+            if ev.nativeVirtualKey() == VK_HANGUL and not ev.isAutoRepeat():
+                self.hangul_held = False
             return False
         if et == QEvent.WindowDeactivate and obj is self:
             self.hanja_held = False
+            self.hangul_held = False
             return False
         if et != QEvent.KeyPress or QApplication.activeModalWidget() is not None:
             return False
@@ -1232,6 +1640,9 @@ class MainWindow(QMainWindow):
         if vk == VK_HANJA:
             self.hanja_held = True
             return True
+        if vk == VK_HANGUL:  # 오른쪽 Alt(한/영 키) 눌림 - 누르고 있는 동안만 Alt 로 취급
+            self.hangul_held = True
+            return True
         qmods = ev.modifiers()
         shift = bool(qmods & Qt.ShiftModifier) or key_down(VK_SHIFT)
         # 한자키(=한국어 키보드의 오른쪽 Ctrl)는 눌림 이벤트만 믿으면 안 떼졌을 때 계속 눌린 걸로 남을 수 있어서,
@@ -1239,8 +1650,11 @@ class MainWindow(QMainWindow):
         ctrl = (bool(qmods & Qt.ControlModifier) or key_down(VK_CONTROL)
                 or (self.hanja_held and async_key_down(VK_HANJA)))
 
+        # Alt = 60초 이동. 왼쪽 Alt, 오른쪽 Alt(VK_RMENU), 한국 키보드의 오른쪽 Alt(한/영 키) 모두 인정
+        alt = (bool(qmods & Qt.AltModifier) or key_down(0x12) or key_down(0xA5)
+               or (self.hangul_held and async_key_down(VK_HANGUL)))
         if vk in (VK_LEFT, VK_RIGHT):
-            step = SEEK_STEPS[(ctrl, shift)]
+            step = 60 if alt else SEEK_STEPS[(ctrl, shift)]
             self.seek_relative(step if vk == VK_RIGHT else -step)
         elif vk in (VK_UP, VK_DOWN):
             self.change_volume(VOLUME_STEP if vk == VK_UP else -VOLUME_STEP)
@@ -1326,6 +1740,10 @@ class MainWindow(QMainWindow):
         self.consecutive_errors = 0
         if self.current:
             self._set_watched([self.current], True)
+            try:
+                self.player.show_text(os.path.basename(self.current), "3000")  # 처음 열 때 파일명을 3초
+            except Exception:
+                pass
         # 기본(default) 표시가 없는 자막(캠코더 MTS 의 PGS 등)은 mpv 가 자동으로 안 켜므로 첫 자막을 켠다
         subs = [t for t in (self._mpv_get("track_list") or []) if t.get("type") == "sub"]
         if subs and not self._mpv_get("sid"):
@@ -1408,7 +1826,7 @@ class MainWindow(QMainWindow):
 
     def _on_update_found(self, latest):
         self.btn_update.setText(f"새 버전 v{latest} 업데이트")
-        self.btn_update.setStyleSheet("QToolButton { color: #1b1b1b; background: #ffc861; font-weight: bold; }")
+        self.btn_update.setStyleSheet("QToolButton { color: #ffffff; background: #2f3237; border-color: #2f3237; font-weight: bold; }")
         self.flash(f"새 버전 v{latest} 이 있습니다 (오른쪽 아래 업데이트 버튼)")
 
     def _busy(self, fn):
@@ -1486,10 +1904,10 @@ class MainWindow(QMainWindow):
     def flash(self, msg, error=False):
         self._msg_token += 1
         token = self._msg_token
-        self.lbl_msg.setStyleSheet("color: #ff8080;" if error else "")
+        self.lbl_msg.setStyleSheet("color: #b42318;" if error else "")
         self.lbl_msg.setText(msg)
         try:
-            self.player.show_text(msg, "1500")
+            self.player.show_text(msg, "3000")
         except Exception:
             pass
         QTimer.singleShot(3000, lambda: token == self._msg_token and self.lbl_msg.setText(""))
@@ -1511,6 +1929,7 @@ class MainWindow(QMainWindow):
             self.lbl_index.setText(f"0 / {len(self.files)}")
             self.lbl_time.setText("--:-- / --:--")
             self.slider.setValue(0)
+        self.lbl_list_count.setText(f"재생목록 · {len(self.files)}개")
         self._update_mode_label()
 
     def _update_mode_label(self):
@@ -1543,18 +1962,23 @@ class MainWindow(QMainWindow):
             self.lbl_time.setText(f"{fmt_time(t)} / {fmt_time(d)}{pct}")
             self.fs_bar.lbl_time.setText(self.lbl_time.text())
             # 버튼은 "누르면 일어날 동작"을 보여줌: 재생 중엔 일시정지 아이콘, 멈춰 있으면 재생 아이콘
-            self.btn_play.setText("▶" if (t is None or paused) else "❚❚")
-            self.fs_bar.btn_play.setText(self.btn_play.text())
+            self.btn_play.setIcon(draw_icon("play_f" if (t is None or paused) else "pause_f", "#ffffff"))
+            self.fs_bar.btn_play.setIcon(self.btn_play.icon())
             if d and t is not None:
                 for sl in (self.slider, self.fs_bar.slider):
                     if not sl.dragging:
                         sl.setValue(int(t / d * 1000))
         else:
-            self.btn_play.setText("▶")
-            self.fs_bar.btn_play.setText("▶")
+            self.btn_play.setIcon(draw_icon("play_f", "#ffffff"))
+            self.fs_bar.btn_play.setIcon(draw_icon("play_f", "#ffffff"))
 
         # 전체화면에서 마우스가 2초간 멈추면 커서 숨김
         if self.isFullScreen():
+            # 영상 창(mpv)은 별도 창이라 클릭 신호가 안 올 수 있어서, 버튼이 눌린 순간을 직접 확인한다
+            buttons_down = bool(QApplication.mouseButtons() & (Qt.LeftButton | Qt.RightButton))
+            if buttons_down and not getattr(self, "_mouse_was_down", False):
+                self._fs_reveal_chrome()
+            self._mouse_was_down = buttons_down
             pos = QCursor.pos()
             geo = self.screen().geometry()
             # 마우스를 화면 아래쪽으로 가져가면 재생바가 뜨고, 위로 올리면 사라진다 (드래그 중에는 유지)
@@ -1604,6 +2028,7 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")  # 위젯 기본 모양이 OS마다 달라서, 스타일시트 색이 어디서나 같게 나오도록
     app.setFont(QFont("Malgun Gothic", 10))
     win = MainWindow()
     win.show()

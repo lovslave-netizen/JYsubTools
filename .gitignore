@@ -13,3 +13,6 @@ JYPlayer_settings.json
 *.dll
 ffmpeg.exe
 ffprobe.exe
+
+# Impeccable design-check settings (not part of the app)
+.impeccable/
