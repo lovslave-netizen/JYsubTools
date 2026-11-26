@@ -807,8 +807,9 @@ class MainWindow(QMainWindow):
         self.listw = PlaylistWidget()
         self.listw.setFocusPolicy(Qt.NoFocus)
         self.listw.itemDoubleClicked.connect(self._on_list_double_click)
-        self.listw.filesDropped.connect(self.add_to_playlist)
+        self.listw.filesDropped.connect(self.drop_to_playlist)
         self.listw.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.listw.customContextMenuRequested.connect(self._on_list_context_menu)
         # 긴 파일명: 가로 스크롤 없이 가운데를 줄인다
         self.listw.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.listw.setItemDelegate(MiddleElideDelegate(self.listw))
@@ -1175,8 +1176,26 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.Accepted:
             self.add_to_playlist(dlg.chosen_paths())
 
-    def add_to_playlist(self, paths):
-        """드래그로 끌어온 파일/폴더 또는 '추가' 버튼으로 고른 파일들을 재생목록 끝에 붙인다."""
+    def drop_to_playlist(self, urls):
+        """끌어다 놓은 항목을 재생목록에 넣는 규칙.
+        - 파일 1개: 그 파일이 있는 폴더의 동영상 (하위 폴더는 빼고, 같은 폴더 파일만)
+        - 파일 여러 개 / 폴더: 끌어온 것만 (폴더는 그 안 하위 폴더까지)"""
+        if len(urls) == 1 and os.path.isfile(urls[0]):
+            path = os.path.abspath(urls[0])
+            folder = os.path.dirname(path)
+            if os.path.splitext(path)[1].lower() not in VIDEO_EXTS:
+                self.flash("동영상 파일이 아닙니다", error=True)
+                return
+            names = sorted(os.listdir(folder), key=natural_key)
+            same = [os.path.join(folder, n) for n in names
+                    if os.path.splitext(n)[1].lower() in VIDEO_EXTS and os.path.isfile(os.path.join(folder, n))]
+            self.add_to_playlist(same, start=path)
+        else:
+            self.add_to_playlist(urls)
+
+    def add_to_playlist(self, paths, start=None):
+        """추가 버튼으로 고른 항목이나 drop_to_playlist 가 고른 경로들을 재생목록 끝에 붙인다.
+        start 는 재생목록이 비어 있었을 때 처음 재생할 파일."""
         new_paths = []
         for p in paths:
             for v in self._scan_videos(os.path.abspath(p)):
@@ -1197,7 +1216,7 @@ class MainWindow(QMainWindow):
         else:
             self.order.extend(new_paths)
         if self.pos < 0 and self.order:
-            self.pos = 0
+            self.pos = self.order.index(start) if start in self.order else 0
             self.play_current()
         self._update_labels()
         self.flash(f"{len(new_paths)}개 재생목록에 추가")
@@ -1205,6 +1224,29 @@ class MainWindow(QMainWindow):
     def _selected_paths(self):
         rows = sorted({idx.row() for idx in self.listw.selectedIndexes()})
         return [self.files[r] for r in rows]
+
+    def remove_selected_or_current_from_playlist(self):
+        """Delete 키 - 재생목록에서만 뺀다. 선택이 없고 재생 중이면 지금 영상을 뺀다."""
+        if not self._selected_paths() and self._is_playing() and self.current in self.files:
+            self.listw.item(self.files.index(self.current)).setSelected(True)
+        self.remove_selected_from_playlist()
+
+    def _on_list_context_menu(self, pos):
+        """재생목록 우클릭 메뉴 - 재생목록에서 삭제 / 휴지통으로 이동 (파일은 Shift+Delete 와 같이 휴지통으로)."""
+        item = self.listw.itemAt(pos)
+        if item is None:
+            return
+        if not item.isSelected():
+            self.listw.clearSelection()
+            item.setSelected(True)
+        menu = QMenu(self)
+        act_remove = menu.addAction("재생목록에서 삭제")
+        act_trash = menu.addAction("휴지통으로 이동")
+        chosen = menu.exec(self.listw.mapToGlobal(pos))
+        if chosen is act_remove:
+            self.remove_selected_from_playlist()
+        elif chosen is act_trash:
+            self.delete_paths(self._selected_paths(), permanent=False)
 
     def copy_selected_to_clipboard(self):
         """Ctrl+C - 선택한 항목의 파일 경로를 클립보드에 복사."""
@@ -1674,8 +1716,12 @@ class MainWindow(QMainWindow):
         elif vk == VK_NEXT:
             self.next_video()
         elif vk == VK_DELETE:
+            # Delete = 재생목록에서만 빼기 (파일은 그대로), Shift+Delete = 휴지통으로 보내기
             if not ev.isAutoRepeat():
-                self.delete_selected_or_current(permanent=shift)
+                if shift:
+                    self.delete_selected_or_current(permanent=False)
+                else:
+                    self.remove_selected_or_current_from_playlist()
         elif vk == VK_SPACE:
             if not ev.isAutoRepeat():
                 self.toggle_pause()
@@ -2008,8 +2054,10 @@ class MainWindow(QMainWindow):
 
     def dropEvent(self, ev):
         urls = [u.toLocalFile() for u in ev.mimeData().urls() if u.isLocalFile()]
-        if urls:
-            self.open_path(urls[0])
+        if len(urls) == 1 and os.path.isdir(urls[0]):
+            self.open_path(urls[0])  # 폴더 1개를 끌어다 놓으면 지금까지처럼 그 폴더로 재생목록을 연다
+        elif urls:
+            self.drop_to_playlist(urls)
 
     def closeEvent(self, ev):
         self.exit_fullscreen()
