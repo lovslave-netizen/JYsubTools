@@ -2074,10 +2074,346 @@ class MainWindow(QMainWindow):
         super().closeEvent(ev)
 
 
+class CompareVideo(QWidget):
+    """비교 창의 영상 한 칸 (mpv 가 그리는 자리). 휠 = 확대/축소, 끌기 = 확대한 화면 옮기기, 더블클릭 = 전체 화면"""
+    wheeled = Signal(int)
+    dragged = Signal(float, float)   # 칸 크기 대비 이동 비율
+    doubleClicked = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.setAttribute(Qt.WA_DontCreateNativeAncestors)
+        self.setAttribute(Qt.WA_NativeWindow)
+        self.setAutoFillBackground(True)
+        pal = self.palette()
+        pal.setColor(QPalette.Window, QColor(0, 0, 0))
+        self.setPalette(pal)
+        self.setMinimumSize(200, 150)
+        self._last = None
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self._last = ev.position()
+
+    def mouseMoveEvent(self, ev):
+        if self._last is not None and ev.buttons() & Qt.LeftButton:
+            d = ev.position() - self._last
+            self._last = ev.position()
+            self.dragged.emit(d.x() / max(1, self.width()), d.y() / max(1, self.height()))
+
+    def mouseReleaseEvent(self, ev):
+        self._last = None
+
+    def mouseDoubleClickEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self.doubleClicked.emit()
+
+    def wheelEvent(self, ev):
+        dy = ev.angleDelta().y()
+        if dy:
+            self.wheeled.emit(1 if dy > 0 else -1)
+        ev.accept()
+
+
+class CompareWindow(QWidget):
+    """원본 ↔ 결과 나란히 비교 (jyplayer --compare 원본 결과).
+    왼쪽이 기준: 재생/멈춤·이동·프레임 이동·확대를 두 화면에 똑같이 하고, 오른쪽이 0.25초 넘게 어긋나면 왼쪽 시각으로 맞춘다.
+    소리는 한쪽만 (기본 왼쪽, A 키로 바꿈). 설정 파일에는 쓰지 않는다 (본 플레이어 설정을 건드리지 않게)."""
+    SYNC_TOL = 0.25
+
+    def __init__(self, left, right):
+        super().__init__()
+        self.setWindowTitle("JY_Player 비교 - " + os.path.basename(left))
+        self.resize(1600, 760)
+        self.paths = [left, right]
+        self.zoom, self.pan = 0.0, [0.0, 0.0]
+        self.audio_side = 0
+        try:
+            with open(SETTINGS_PATH, encoding="utf-8") as f:
+                hwdec = json.load(f).get("hwdec", "auto-safe")
+        except Exception:
+            hwdec = "auto-safe"
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.videos, self.heads, self.players = [], [], []
+        for i, p in enumerate(self.paths):
+            col = QVBoxLayout()
+            col.setSpacing(4)
+            head = QLabel()
+            head.setObjectName("head")
+            head.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            v = CompareVideo()
+            v.wheeled.connect(lambda d: self.change_zoom(d * ZOOM_STEP))
+            v.dragged.connect(self.drag_pan)
+            v.doubleClicked.connect(self.toggle_fullscreen)
+            col.addWidget(head)
+            col.addWidget(v, 1)
+            row.addLayout(col, 1)
+            self.videos.append(v)
+            self.heads.append(head)
+            pl = mpv.MPV(wid=str(int(v.winId())), vo="gpu", hwdec=hwdec, keep_open="yes", idle="yes",
+                         input_default_bindings=False, input_vo_keyboard=False, input_cursor=False,
+                         window_dragging=False, cursor_autohide="no", ytdl=False, pause=True,
+                         osd_font="Malgun Gothic", osd_font_size=OSD_FONT_SIZE, osd_duration=900)
+            pl.mute = (i != self.audio_side)
+            self.players.append(pl)
+        lay.addLayout(row, 1)
+
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+        self.btn_play = QToolButton()
+        self.btn_play.setObjectName("primary")
+        self.btn_play.setFixedSize(36, 36)
+        self.btn_play.setIconSize(QSize(18, 18))
+        self.btn_play.setIcon(draw_icon("play_f", "#ffffff"))
+        self.btn_play.setToolTip("재생 / 멈춤 (Space)")
+        self.btn_play.setFocusPolicy(Qt.NoFocus)
+        self.btn_play.clicked.connect(self.toggle_pause)
+        self.slider = ClickSlider()
+        self.slider.seekRequested.connect(self.seek_fraction)
+        self.lbl_time = QLabel("--:-- / --:--")
+        self.lbl_time.setObjectName("time")
+        self.btn_audio = QToolButton()
+        self.btn_audio.setFocusPolicy(Qt.NoFocus)
+        self.btn_audio.setToolTip("소리를 낼 쪽 바꾸기 (A)")
+        self.btn_audio.clicked.connect(self.toggle_audio)
+        self.btn_swap = QToolButton()
+        self.btn_swap.setText("좌우 바꾸기")
+        self.btn_swap.setFocusPolicy(Qt.NoFocus)
+        self.btn_swap.setToolTip("왼쪽·오른쪽 영상 자리 바꾸기 (S)")
+        self.btn_swap.clicked.connect(self.swap_sides)
+        bar.addWidget(self.btn_play)
+        bar.addWidget(self.slider, 1)
+        bar.addWidget(self.lbl_time)
+        bar.addWidget(self.btn_audio)
+        bar.addWidget(self.btn_swap)
+        lay.addLayout(bar)
+        hint = QLabel("Space 재생/멈춤 · ←/→ 5초 (Shift 10초, Ctrl 30초) · , / . 한 프레임 · 휠 확대 · 끌기 화면 이동 · "
+                      "0 확대 원래대로 · A 소리 쪽 · S 좌우 바꾸기 · F/더블클릭 전체 화면 · Esc 닫기")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        self.setStyleSheet("""
+            QWidget { background: #f3ecdd; color: #2b2622; }
+            QLabel#head { color: #2b2622; font-size: 12px; padding: 2px 2px; }
+            QLabel#time { color: #7a6f63; padding: 0 6px; }
+            QLabel#hint { color: #7a6f63; font-size: 11px; }
+            QToolButton { color: #2b2622; background: #f3ecdd; border: 1px solid #e2d8c6; border-radius: 4px; padding: 6px 12px; }
+            QToolButton:hover { background: #ebe2d0; }
+            QToolButton#primary { background: #2f3237; border-color: #2f3237; color: #ffffff; border-radius: 18px; padding: 0; }
+            QToolButton#primary:hover { background: #454a52; }
+            QSlider::groove:horizontal { height: 4px; background: #e2d8c6; border-radius: 2px; }
+            QSlider::sub-page:horizontal { background: #2f3237; border-radius: 2px; }
+            QSlider::handle:horizontal { width: 12px; margin: -5px 0; background: #2b2622; border-radius: 6px; }
+        """)
+
+        for pl, p in zip(self.players, self.paths):
+            pl.play(p)
+        self._update_heads()
+        self.tick = QTimer(self)
+        self.tick.setInterval(200)
+        self.tick.timeout.connect(self._on_tick)
+        self.tick.start()
+        QTimer.singleShot(600, lambda: self._set_pause(False))       # 두 파일이 다 열린 뒤 같이 재생 시작
+
+    # ---- 표시 ----
+    def _update_heads(self):
+        names = ("왼쪽", "오른쪽")
+        for i, (h, p) in enumerate(zip(self.heads, self.paths)):
+            try:
+                size = fmt_size(os.path.getsize(p))
+            except OSError:
+                size = "?"
+            fmt = (self._get(i, "video-format") or "").upper()
+            w, hh = self._get(i, "width"), self._get(i, "height")
+            res = f"{w}x{hh}" if w and hh else ""
+            rate = self._get(i, "video-bitrate")
+            rate = f"{rate / 1_000_000:.1f} Mbps" if rate else ""
+            sound = "  🔊" if i == self.audio_side else ""
+            info = "  ·  ".join(x for x in (size, fmt, res, rate) if x)
+            h.setText(f"<b>{names[i]}</b>  {os.path.basename(p)}  <span style='color:#7a6f63'>{info}</span>{sound}")
+            h.setToolTip(p)
+        self.btn_audio.setText("소리: " + names[self.audio_side])
+
+    def _get(self, i, name):
+        try:
+            return getattr(self.players[i], name.replace("-", "_"))     # 본 플레이어의 _mpv_get 과 같은 방식
+        except Exception:
+            return None
+
+    # ---- 함께 조작 ----
+    def _set_pause(self, v):
+        for pl in self.players:
+            try:
+                pl.pause = v
+            except Exception:
+                pass
+        if not v:
+            self._resync()
+        self.btn_play.setIcon(draw_icon("play_f" if v else "pause_f", "#ffffff"))
+
+    def toggle_pause(self):
+        self._set_pause(not bool(self._get(0, "pause")))
+
+    def _resync(self):
+        t = self._get(0, "time-pos")
+        if t is not None:
+            try:
+                self.players[1].seek(t, "absolute", "exact")
+            except Exception:
+                pass
+
+    def seek_relative(self, sec):
+        t = self._get(0, "time-pos")
+        if t is None:
+            return
+        target = max(0.0, t + sec)
+        for pl in self.players:
+            try:
+                pl.seek(target, "absolute", "exact")
+            except Exception:
+                pass
+        self.players[0].show_text(f"{'+' if sec > 0 else '-'}{abs(sec)}초  {fmt_time(target)}", "800")
+
+    def seek_fraction(self, frac, exact):
+        d = self._get(0, "duration")
+        if not d:
+            return
+        for pl in self.players:
+            try:
+                pl.seek(frac * d, "absolute", "exact" if exact else "keyframes")
+            except Exception:
+                pass
+
+    def frame_step(self, forward):
+        self._set_pause(True)
+        for pl in self.players:
+            try:
+                pl.command("frame-step" if forward else "frame-back-step")
+            except Exception:
+                pass
+
+    def change_zoom(self, delta):
+        self.zoom = max(-2.0, min(4.0, self.zoom + delta))
+        if self.zoom <= 0:
+            self.pan = [0.0, 0.0]
+        self._apply_view()
+
+    def drag_pan(self, fx, fy):
+        if self.zoom <= 0:
+            return
+        scale = 2 ** self.zoom
+        lim = (scale - 1) / (2 * scale) + 0.01
+        self.pan = [max(-lim, min(lim, self.pan[0] + fx / scale)), max(-lim, min(lim, self.pan[1] + fy / scale))]
+        self._apply_view()
+
+    def reset_view(self):
+        self.zoom, self.pan = 0.0, [0.0, 0.0]
+        self._apply_view()
+
+    def _apply_view(self):
+        for pl in self.players:
+            try:
+                pl.video_zoom = self.zoom
+                pl.video_pan_x, pl.video_pan_y = self.pan
+            except Exception:
+                pass
+
+    def toggle_audio(self):
+        self.audio_side = 1 - self.audio_side
+        for i, pl in enumerate(self.players):
+            pl.mute = (i != self.audio_side)
+        self._update_heads()
+
+    def swap_sides(self):
+        """두 영상의 자리를 바꾼다 (같은 시각에서 이어서). 소리는 같은 영상을 따라감"""
+        t = self._get(0, "time-pos") or 0
+        paused = bool(self._get(0, "pause"))
+        self.paths.reverse()
+        self.audio_side = 1 - self.audio_side
+        for i, (pl, p) in enumerate(zip(self.players, self.paths)):
+            pl.mute = (i != self.audio_side)
+            pl.pause = True
+            pl.command("loadfile", p, "replace", "-1", f"start={t:.3f}")     # mpv 0.38+ 형식 (index 자리 -1)
+        self._update_heads()
+        QTimer.singleShot(600, lambda: self._set_pause(paused))
+
+    def toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+
+    def keyPressEvent(self, ev):
+        k, mods = ev.key(), ev.modifiers()
+        step = 30 if mods & Qt.ControlModifier else 10 if mods & Qt.ShiftModifier else 5
+        if k == Qt.Key_Space:
+            self.toggle_pause()
+        elif k == Qt.Key_Left:
+            self.seek_relative(-step)
+        elif k == Qt.Key_Right:
+            self.seek_relative(step)
+        elif k == Qt.Key_Period:
+            self.frame_step(True)
+        elif k == Qt.Key_Comma:
+            self.frame_step(False)
+        elif k in (Qt.Key_0, Qt.Key_Insert):
+            self.reset_view()
+        elif k in (Qt.Key_Plus, Qt.Key_Equal):
+            self.change_zoom(ZOOM_STEP)
+        elif k == Qt.Key_Minus:
+            self.change_zoom(-ZOOM_STEP)
+        elif k == Qt.Key_A:
+            self.toggle_audio()
+        elif k == Qt.Key_S:
+            self.swap_sides()
+        elif k == Qt.Key_F:
+            self.toggle_fullscreen()
+        elif k == Qt.Key_Escape:
+            if self.isFullScreen():
+                self.showNormal()
+            else:
+                self.close()
+        else:
+            super().keyPressEvent(ev)
+
+    def _on_tick(self):
+        for v in self.videos:
+            disable_child_windows(int(v.winId()))           # mpv 자식 창이 키보드·마우스를 가로채지 않게
+        t, d = self._get(0, "time-pos"), self._get(0, "duration")
+        if not self.slider.dragging and t is not None and d:
+            self.slider.setValue(int(t / d * 1000))
+        self.lbl_time.setText(f"{fmt_time(t)} / {fmt_time(d)}")
+        t2 = self._get(1, "time-pos")
+        if t is not None and t2 is not None and not self._get(0, "pause") and abs(t - t2) > self.SYNC_TOL:
+            self._resync()                                     # 재생 중 어긋나면 오른쪽을 왼쪽 시각으로
+        if not getattr(self, "_heads_done", False) and self._get(0, "width") and self._get(1, "width"):
+            self._heads_done = True
+            self._update_heads()                               # 코덱·해상도는 파일이 열린 뒤에 알 수 있음
+
+    def closeEvent(self, ev):
+        self.tick.stop()
+        for pl in self.players:
+            try:
+                pl.terminate()
+            except Exception:
+                pass
+        super().closeEvent(ev)
+
+
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")  # 위젯 기본 모양이 OS마다 달라서, 스타일시트 색이 어디서나 같게 나오도록
     app.setFont(QFont("Malgun Gothic", 10))
+    if len(sys.argv) >= 4 and sys.argv[1] == "--compare":     # jyplayer --compare 원본 결과 : 나란히 비교 창만 띄움
+        cw = CompareWindow(sys.argv[2], sys.argv[3])
+        cw.show()
+        sys.exit(app.exec())
     win = MainWindow()
     win.show()
     if len(sys.argv) > 1:

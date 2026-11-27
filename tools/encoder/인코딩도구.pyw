@@ -257,6 +257,22 @@ def build_cmd(src, dst, enc, q, preset, info):
     return cmd
 
 
+def find_jyplayer():
+    """설치된 JYPlayer.exe (JY_Player 설치 위치: %LOCALAPPDATA%\\Programs\\JY_Player\\jyplayer). 없으면 None"""
+    p = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "JY_Player", "jyplayer", "JYPlayer.exe")
+    return p if os.path.isfile(p) else None
+
+
+def open_side_by_side(orig, out):
+    """JYPlayer 의 나란히 비교 창 (jyplayer --compare 원본 결과). JYPlayer 가 없으면 두 파일을 따로 연다"""
+    jp = find_jyplayer()
+    if jp:
+        subprocess.Popen([jp, "--compare", orig, out])
+    else:
+        os.startfile(orig)
+        os.startfile(out)
+
+
 def is_hevc(it):
     """목록 항목이 이미 H.265(hevc) 이면 True (다시 H.265 로 인코딩하지 않는다)"""
     return it["info"]["codec"] == "hevc"
@@ -656,6 +672,17 @@ class App(tk.Tk):
         if iid and iid not in self.tree.selection():
             self.tree.selection_set(iid)
         m = tk.Menu(self, tearoff=0)
+        it = self.items.get(iid) if iid else None
+        out = (it or {}).get("out") or {}
+        if out.get("path") and os.path.exists(out["path"]):        # 인코딩이 끝난 행: 원본과 결과를 따로 재생해 비교
+            m.add_command(label="원본 실행", command=lambda p=it["path"]: os.startfile(p))
+            m.add_command(label="인코딩된 것 실행", command=lambda p=out["path"]: os.startfile(p))
+            m.add_command(label="원본 ↔ 결과 비교 창", command=self.compare)
+            jp = find_jyplayer()
+            m.add_command(label="JYPlayer 로 나란히 비교" if jp else "JYPlayer 로 나란히 비교 (JYPlayer 가 설치돼 있지 않음)",
+                          state="normal" if jp else "disabled",
+                          command=lambda a=it["path"], b=out["path"]: open_side_by_side(a, b))
+            m.add_separator()
         m.add_command(label="선택한 행 체크", command=lambda: self.check_selected(True))
         m.add_command(label="선택한 행 체크 해제", command=lambda: self.check_selected(False))
         m.add_separator()
@@ -1055,6 +1082,9 @@ class App(tk.Tk):
         bf.grid(row=9, column=0, columnspan=3, sticky="w")
         ttk.Button(bf, text="원본 재생", command=lambda: os.startfile(it["path"])).pack(side="left")
         ttk.Button(bf, text="결과 재생", command=lambda: os.startfile(it["out"]["path"])).pack(side="left", padx=6)
+        if find_jyplayer():
+            ttk.Button(bf, text="나란히 비교 (JYPlayer)",
+                       command=lambda: open_side_by_side(it["path"], it["out"]["path"])).pack(side="left", padx=(0, 6))
         ttk.Button(bf, text="원본 폴더 열기",
                    command=lambda: subprocess.Popen(["explorer", "/select,", it["path"]])).pack(side="left")
 
