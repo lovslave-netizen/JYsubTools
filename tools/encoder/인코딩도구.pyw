@@ -305,7 +305,16 @@ def build_merge_cmd(items, dst, enc, q, preset):
     for path, _ in items:
         cmd += ["-i", path]
     first = items[0][1]
-    fps = first.get("fps") or "30"
+    # 프레임은 묶음 중 가장 높은 값에 맞춘다 (낮은 영상은 같은 장면을 반복해 채움 → 높은 영상이 깎이지 않음)
+    def _fps_val(s):
+        try:
+            a, _, b = str(s).partition("/")
+            return float(a) / float(b or 1)
+        except (ValueError, ZeroDivisionError):
+            return 0.0
+    fps = max((i.get("fps") or "30" for _, i in items), key=_fps_val)
+    if _fps_val(fps) <= 0:
+        fps = "30"
     same_res = len({i["res"] for _, i in items}) == 1
     try:
         w, h = (int(x) for x in first["res"].split("x"))
