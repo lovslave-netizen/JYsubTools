@@ -808,11 +808,11 @@ class App(tk.Tk):
         self.pb["value"] = 0
         self.sched_summary()
 
-    def set_all(self, v):  # 전체 선택에서도 "예전에 커졌던" 파일은 제외 (직접 체크해야 함)
+    def set_all(self, v):  # 전체 선택 = 말 그대로 전부 (H.265·예전에 커졌던 파일 포함. 시작할 때 따로 확인 창이 뜬다)
         if self.encoding:
             return
         for iid, it in self.items.items():
-            it["checked"] = v and not it.get("bigger") and not is_hevc(it)
+            it["checked"] = v
             self.refresh(iid)
 
     def select_non_hevc(self):
